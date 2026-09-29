@@ -76,6 +76,58 @@ class IngestionResult:
     reason: str = ""
     deadline_hit: bool = False  # stopped early -- partial result, not a failure
 
+    def to_json_dict(self) -> dict:
+        """Restricted, sanitized serialization for the privilege-separated
+        drop file -- ids/subject/snippet/sender/date/labels only, never a
+        token or any other credential-shaped field."""
+        return {
+            "status": self.status.value,
+            "account": self.account,
+            "label_id": self.label_id,
+            "label_name": self.label_name,
+            "messages": [
+                {
+                    "id": m.id,
+                    "subject": m.subject,
+                    "snippet": m.snippet,
+                    "sender": m.sender,
+                    "date": m.date,
+                    "label_ids": list(m.label_ids),
+                }
+                for m in self.messages
+            ],
+            "duplicates_skipped": self.duplicates_skipped,
+            "rejected_stale_label_ids": list(self.rejected_stale_label_ids),
+            "malformed_ids": list(self.malformed_ids),
+            "reason": self.reason,
+            "deadline_hit": self.deadline_hit,
+        }
+
+    @staticmethod
+    def from_json_dict(d: dict) -> "IngestionResult":
+        return IngestionResult(
+            status=IngestStatus(d["status"]),
+            account=d.get("account", ""),
+            label_id=d.get("label_id", ""),
+            label_name=d.get("label_name", ""),
+            messages=[
+                GmailMessage(
+                    id=m["id"],
+                    subject=m["subject"],
+                    snippet=m["snippet"],
+                    sender=m["sender"],
+                    date=m["date"],
+                    label_ids=tuple(m.get("label_ids", [])),
+                )
+                for m in d.get("messages", [])
+            ],
+            duplicates_skipped=d.get("duplicates_skipped", 0),
+            rejected_stale_label_ids=list(d.get("rejected_stale_label_ids", [])),
+            malformed_ids=list(d.get("malformed_ids", [])),
+            reason=d.get("reason", ""),
+            deadline_hit=d.get("deadline_hit", False),
+        )
+
 
 def verify_account(client: GmailReadonlyClient) -> str:
     try:

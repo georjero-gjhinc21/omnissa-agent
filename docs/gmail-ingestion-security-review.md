@@ -76,6 +76,52 @@ supply an interactive password. Neither mitigation above can be
 implemented from this execution context -- both require root to create
 a user/group or a systemd unit with elevated privilege.
 
+### 2026-09-29, later same day: chosen architecture, prepared for operator execution
+
+Full design + idempotent scripts + systemd units are in
+`infra/omnissa-ingest/` (`README.md`, `deploy-root.sh`,
+`rollback-root.sh`, and the four unit files). Summary of the chosen
+boundary:
+
+- Dedicated system user `omnissa-ingest` (no login/password) owns the
+  OAuth credential (`/var/lib/omnissa-ingest/google/`, mode 700/600) and
+  is the ONLY identity that ever executes Gmail-touching code
+  (`cli.py ingest` -- the only command anywhere in this codebase that
+  loads a token or calls the Gmail API).
+- A private, root-owned copy of `src/` at `/opt/omnissa-agent`, not
+  writable by `georjero` -- closes the "agent edits the trusted
+  service's code" bypass.
+- A one-way, group-mediated drop directory
+  (`/var/lib/omnissa-agent/drop/`, mode 2750, group `omnissa-readers`)
+  -- `omnissa-ingest` writes sanitized results (ids/subject/snippet/
+  sender/date/labels only), `georjero` reads, `georjero` cannot write.
+- Two systemd timers drive `cli.py ingest` on schedule (hourly; daily
+  07:50 America/Chicago, confirmed the system's actual local timezone).
+  `georjero` has no systemctl rights over either unit -- no bridge from
+  the agent identity to the credential owner exists at all, not even a
+  narrow sudoers rule, since the timers need no external trigger.
+- The scheduled coding agent (Orca automation, running as `georjero`)
+  only ever calls the new `cli.py classify` entry point against the drop
+  file -- it never holds or requests a credential, and there is no
+  `--email-status` flag on that command for it to assert; the file's
+  own `status` field (written exclusively by the privileged side) is
+  what "VERIFIED" comes from.
+
+Indirect-bypass checklist (Phase 2.5 of the operator's brief), what's
+closed and what isn't:
+
+| Vector | Status |
+|---|---|
+| `georjero` sudo (password-gated) | Not usable by this session; separate from the isolation boundary itself |
+| `georjero` in `docker` group | **NOT closed** -- root-equivalent, independent of sudo; see below |
+| Edit the ingestion service's code/config | Closed -- `/opt/omnissa-agent` and `/etc/systemd/system/*.service` are root-owned, `georjero` has no write access |
+| Control the unit (start/stop/enable) | Closed -- no sudoers rule grants `georjero` any systemctl right over these units |
+| Read its process environment (`/proc/<pid>/environ`) | Closed -- kernel-enforced, different uid, no ptrace capability |
+| Read its logs (journalctl) | `georjero` CAN read them (in the `adm` group, which has journal ACL access) -- acceptable only because `cli.py ingest`'s stdout/stderr never contain secret material by design (verified: only status/account/count fields are ever printed) |
+| Its socket | N/A -- this design uses a systemd timer + file handoff, no socket exists |
+| World-readable output directory | Closed -- drop dir is mode 2750 (group-restricted to `omnissa-readers`, not world) |
+| Command-line argument exposure (`ps`/`/proc/pid/cmdline`) | Closed -- only file *paths* are ever passed as arguments, never secret *values* |
+
 As a concrete (not hypothetical) proof of the risk this leaves open:
 
 ```

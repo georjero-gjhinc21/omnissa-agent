@@ -1,0 +1,13 @@
+[Unit]
+Description=Daily 07:50 America/Chicago trigger for omnissa-ingest-brief.service
+# System timezone is already America/Chicago (verified 2026-09-29 via
+# `timedatectl`) -- this local-time spec needs no explicit TZ. Fires 10
+# minutes before the 08:00 America/Chicago Orca "classify" automation so
+# the drop file is always fresh when that automation reads it.
+
+[Timer]
+OnCalendar=*-*-* 07:50:00
+Persistent=true
+
+[Install]
+WantedBy=timers.target

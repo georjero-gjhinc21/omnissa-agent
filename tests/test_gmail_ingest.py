@@ -211,6 +211,19 @@ def test_zero_matching_messages_is_ok_status_with_empty_list(tmp_path):
     assert result.messages == []
 
 
+def test_ingestion_result_json_roundtrip_for_drop_file(tmp_path):
+    client = FakeClient(pages=[(["m1"], None)], messages={"m1": _raw_message("m1", subject="Hi")})
+    result = gi.run_ingestion(client, state_base=tmp_path)
+
+    d = result.to_json_dict()
+    assert "access_token" not in str(d) and "refresh_token" not in str(d)
+
+    restored = gi.IngestionResult.from_json_dict(d)
+    assert restored.status == result.status
+    assert [m.id for m in restored.messages] == [m.id for m in result.messages]
+    assert restored.label_name == result.label_name
+
+
 def test_filtered_message_never_carries_raw_gmail_payload_shape():
     raw = _raw_message("m1")
     msg = gi._to_gmail_message(raw)

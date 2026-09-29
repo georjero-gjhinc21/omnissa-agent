@@ -1,0 +1,31 @@
+[Unit]
+Description=Omnissa Gmail ingestion (daily brief window) -- privileged identity only
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=omnissa-ingest
+Group=omnissa-ingest
+ExecStart=/opt/omnissa-agent/venv/bin/python3 -m omnissa_agent.cli ingest \
+  --client-secret /var/lib/omnissa-ingest/google/client_secret.json \
+  --token /var/lib/omnissa-ingest/google/token.json \
+  --out /var/lib/omnissa-agent/drop/latest-brief.json \
+  --max-messages 100 --max-pages 10 --deadline 120 \
+  --state-dir /var/lib/omnissa-ingest/state
+TimeoutStartSec=150
+
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+RestrictNamespaces=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+CapabilityBoundingSet=
+ReadWritePaths=/var/lib/omnissa-ingest /var/lib/omnissa-agent/drop

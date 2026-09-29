@@ -74,6 +74,69 @@ verified, re-run this session's Phase 2 check, then Phase 5 (scheduler
 creation, still disabled-first per that phase's own procedure) becomes
 unblocked. Nothing else is blocking scheduling.
 
+## 2026-09-29, same day: root handoff prepared, code split for privilege separation
+
+Operator wants full autonomous 24x7 operation and authorized preparing
+(not executing -- no sudo password available to this session) the
+isolation cutover. Built:
+
+- **Code split**: `cli.py` gained `ingest` (privileged-side: the only
+  command that ever touches an OAuth token/Gmail API; writes a
+  sanitized JSON drop file -- ids/subject/snippet/sender/date/labels,
+  never a token) and `classify` (unprivileged-side: reads that drop
+  file, derives VERIFIED/BLOCKED from its own `status` field, never
+  accepts an externally-asserted status string, never touches Gmail).
+  `gmail_ingest.IngestionResult` gained `to_json_dict`/`from_json_dict`
+  for this handoff. `run` (single-process) kept for manual/ad-hoc use
+  by whoever directly holds the credential -- explicitly documented as
+  NOT for the scheduled coding agent once isolation is deployed.
+  Verified live against the real account: `ingest` then `classify` in
+  two separate processes/state dirs produced the same result as the
+  single-process `run` path.
+- **Chosen isolation architecture**, fully written up in
+  `docs/gmail-ingestion-security-review.md` and implemented as an
+  idempotent operator script in `infra/omnissa-ingest/`: dedicated
+  system user `omnissa-ingest` (owns the credential, runs only
+  `cli.py ingest` via two systemd timers -- hourly scan, daily 07:50
+  America/Chicago brief-window fetch, confirmed the box's actual local
+  timezone); root-owned code deploy to `/opt/omnissa-agent` (not
+  georjero-writable, closing the "agent edits the trusted service"
+  bypass); one-way group-mediated drop directory
+  (`/var/lib/omnissa-agent/drop/`, mode 2750, group `omnissa-readers`
+  which georjero joins, read-only). Georjero/Claude/Orca get NO
+  systemctl rights over the privileged units at all -- no bridge needed
+  since timers self-trigger.
+- **Full indirect-bypass checklist worked** (sudo, docker/lxd, editing
+  the service's code/config, controlling its unit, reading its
+  environment, reading its logs, its socket, world-readable output,
+  command-line argument exposure) -- table in the security review doc.
+  **One is explicitly NOT closed**: georjero is in the `docker` group,
+  which is root-equivalent independent of sudo. This isolation design
+  defeats accidental/casual same-UID access completely; it does not
+  defeat a deliberate privilege escalation by georjero itself via
+  Docker. Flagged prominently in the script's own output and the repo
+  docs -- not something a new user account can fix, and not something
+  fixed here (would mean changing georjero's group memberships, outside
+  this project's scope, operator's call).
+- `infra/omnissa-ingest/deploy-root.sh` (idempotent, operator-run,
+  prints PASS/FAIL for 4 negative checks + 1 positive check, does not
+  auto-enable the timers) and `rollback-root.sh` (preserves the OAuth
+  authorization and the ingest-side checkpoint, doesn't delete either).
+- `pytest tests/ -q` → **98/98 green** (14 new tests for `ingest`/
+  `classify`). `infra/omniroute/tests/test-omniroute.sh` → 23/23 still
+  green.
+
+**STOPPED HERE per the operator's own instruction**: handoff presented,
+not executed (no sudo password available to this session, and
+executing root-level changes without the operator's own hands-on-key
+wasn't the ask anyway). Next action is the operator's:
+`sudo bash infra/omnissa-ingest/deploy-root.sh`, review its PASS/FAIL
+output, then tell this session so it can re-verify isolation with live
+negative/positive tests, run one bounded live scan+brief through the
+new split path, re-run all tests, and only then move to Orca automation
+creation (disabled first, per the operator's Phase 5 procedure) for the
+`classify` side.
+
 ---
 
 - Status: scaffolded 2026-09-29, Milestone 1 in progress

@@ -1,16 +1,36 @@
 """Production entry points for scheduled scans/briefs.
 
-THE SANCTIONED LIVE PATH IS ``run``:
+TWO DEPLOYMENT SHAPES:
 
-  python3 -m omnissa_agent.cli run --kind scan --client-secret <path> --token <path>
-  python3 -m omnissa_agent.cli run --kind brief --client-secret <path> --token <path>
+1. Single-process (``run``) -- for manual/ad-hoc use only, by whoever
+   directly holds the OAuth credential. NOT for a scheduled coding agent
+   once isolation is deployed, since it requires direct token access.
 
-``run`` does its OWN account/label verification at runtime (refreshes
-the OAuth token, calls Gmail, checks the profile email and the exact
-``@omnissa.com`` label -- see gmail_ingest.py) and only proceeds if that
-verification passes. There is no way for a caller to just assert
-"VERIFIED" on the command line for this path; the status is a return
-value from real API calls, not an argument.
+     python3 -m omnissa_agent.cli run --kind scan --client-secret <path> --token <path>
+     python3 -m omnissa_agent.cli run --kind brief --client-secret <path> --token <path>
+
+2. Privilege-separated (``ingest`` + ``classify``) -- THE SHAPE FOR
+   SCHEDULED PRODUCTION. ``ingest`` runs only as the dedicated,
+   credential-owning identity (a systemd timer, never a coding agent) and
+   writes a restricted, sanitized JSON drop file. ``classify`` runs as
+   the scheduled coding agent's own identity, never touches Gmail or a
+   token, and reads that drop file:
+
+     # privileged identity only, e.g. via systemd timer:
+     python3 -m omnissa_agent.cli ingest --client-secret <path> --token <path> --out /var/lib/omnissa-agent/drop/latest-scan.json
+
+     # the scheduled coding agent, unprivileged:
+     python3 -m omnissa_agent.cli classify --kind scan --ingest-result /var/lib/omnissa-agent/drop/latest-scan.json
+
+Both shapes do their OWN account/label verification at runtime (refresh
+the OAuth token, call Gmail, check the profile email and the exact
+``Archive_/@omnissa.com`` label -- see gmail_ingest.py) and only proceed
+if that verification passes. ``classify`` never accepts an
+externally-asserted "VERIFIED" string on the command line -- the status
+comes from the drop file's own ``status`` field, which only the
+privileged ``ingest`` identity can write (enforced by filesystem
+ownership/permissions in the isolated deployment, not by this code
+alone -- see docs/gmail-ingestion-security-review.md).
 
 ``scan``/``brief`` (no live Gmail call) remain for OFFLINE/SYNTHETIC
 TESTING AND MANUAL REPLAY ONLY -- they take a pre-built messages JSON
@@ -255,42 +275,18 @@ def _draft(args) -> int:
     return 0
 
 
-def _run_live(args, *, kind: str) -> int:
-    """The sanctioned live path: refresh token -> verify -> ingest -> pipeline.
+def _pipeline_from_ingest_result(ingest_result, *, kind: str, args) -> int:
+    """Shared back half: a verified IngestionResult -> Agent A/B -> report.
 
-    Never accepts an externally-asserted "VERIFIED" string. The email
-    status string used downstream is built here, after real checks, from
-    the ingestion result -- not supplied by the caller.
+    Used by both ``run`` (single-process, credential-holding) and
+    ``classify`` (privilege-separated: reads a drop file written by a
+    separate, credential-holding identity -- never touches Gmail itself).
     """
-    try:
-        client_config = google_oauth.load_client_config(Path(args.client_secret))
-    except Exception as exc:
-        print(f"ERROR: cannot load --client-secret: {exc}", file=sys.stderr)
-        return UNEXPECTED_ERROR
-
-    try:
-        access_token = google_oauth.refresh_access_token(client_config, Path(args.token))
-    except google_oauth.OAuthError as exc:
-        print(f"REFUSED: token refresh failed: {exc}", file=sys.stderr)
-        return REFUSED
-
-    state_base = Path(args.state_dir) if args.state_dir else None
-    gmail_client = GmailReadonlyClient(access_token)
-    ingest_result = gmail_ingest.run_ingestion(
-        gmail_client,
-        max_pages=args.max_pages,
-        max_messages=args.max_messages,
-        deadline_s=args.deadline,
-        state_base=state_base,
-    )
     if ingest_result.deadline_hit:
         print("NOTE: ingestion deadline reached -- partial result this run", file=sys.stderr)
 
     if ingest_result.status != gmail_ingest.IngestStatus.OK:
-        print(
-            f"{ingest_result.status.value}: {ingest_result.reason}",
-            file=sys.stderr,
-        )
+        print(f"{ingest_result.status.value}: {ingest_result.reason}", file=sys.stderr)
         return _INGEST_STATUS_TO_EXIT_CODE[ingest_result.status]
 
     email_status = (
@@ -298,6 +294,7 @@ def _run_live(args, *, kind: str) -> int:
         f"label_name={ingest_result.label_name} (runtime-checked by gmail_ingest.run_ingestion)"
     )
     llm_combo = router.LOCAL_ONLY_COMBO if args.llm_policy == "local-only" else router.DEFAULT_COMBO
+    state_base = Path(args.state_dir) if args.state_dir else None
 
     report = run_pilot(
         source=StaticMessageSource(ingest_result.messages),
@@ -324,6 +321,114 @@ def _run_live(args, *, kind: str) -> int:
         print("LLM summary deferred (all omniroute backends failed this run)", file=sys.stderr)
         return LLM_DEFERRED
     return 0
+
+
+def _run_live(args, *, kind: str) -> int:
+    """Single-process live path: refresh token -> verify -> ingest -> pipeline,
+    all as whatever identity runs this command. Requires direct credential
+    access -- fine for manual/ad-hoc use, but this is exactly the identity
+    that must NOT be the same as the scheduled coding agent once isolation
+    is deployed. See ``ingest`` + ``classify`` for the privilege-separated
+    split used by the actual scheduled jobs.
+    """
+    try:
+        client_config = google_oauth.load_client_config(Path(args.client_secret))
+    except Exception as exc:
+        print(f"ERROR: cannot load --client-secret: {exc}", file=sys.stderr)
+        return UNEXPECTED_ERROR
+
+    try:
+        access_token = google_oauth.refresh_access_token(client_config, Path(args.token))
+    except google_oauth.OAuthError as exc:
+        print(f"REFUSED: token refresh failed: {exc}", file=sys.stderr)
+        return REFUSED
+
+    state_base = Path(args.state_dir) if args.state_dir else None
+    gmail_client = GmailReadonlyClient(access_token)
+    ingest_result = gmail_ingest.run_ingestion(
+        gmail_client,
+        max_pages=args.max_pages,
+        max_messages=args.max_messages,
+        deadline_s=args.deadline,
+        state_base=state_base,
+    )
+    return _pipeline_from_ingest_result(ingest_result, kind=kind, args=args)
+
+
+def _ingest(args) -> int:
+    """PRIVILEGED-SIDE entry point: the ONLY command that ever touches an
+    OAuth token or a Gmail API. Never invoked by a coding agent in the
+    isolated deployment -- only by the dedicated ingestion identity's own
+    systemd timer. Writes a restricted, sanitized JSON drop file (ids/
+    subject/snippet/sender/date/labels -- never a token, never a raw
+    Gmail API response) atomically, then exits. No classification, no
+    OmniRoute call, no LLM -- this process never needs network access to
+    anything but accounts.google.com / gmail.googleapis.com.
+    """
+    try:
+        client_config = google_oauth.load_client_config(Path(args.client_secret))
+        access_token = google_oauth.refresh_access_token(client_config, Path(args.token))
+    except google_oauth.OAuthError as exc:
+        print(f"REFUSED: {exc}", file=sys.stderr)
+        return REFUSED
+    except Exception as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        return UNEXPECTED_ERROR
+
+    state_base = Path(args.state_dir) if args.state_dir else None
+    gmail_client = GmailReadonlyClient(access_token)
+    ingest_result = gmail_ingest.run_ingestion(
+        gmail_client,
+        max_pages=args.max_pages,
+        max_messages=args.max_messages,
+        deadline_s=args.deadline,
+        state_base=state_base,
+    )
+
+    out_path = Path(args.out)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = out_path.with_suffix(".tmp")
+    tmp_path.write_text(json.dumps(ingest_result.to_json_dict(), indent=2))
+    tmp_path.chmod(0o640)  # owner rw, group r -- the narrow one-way handoff
+    tmp_path.replace(out_path)  # atomic -- a reader never sees a partial file
+
+    print(
+        f"status={ingest_result.status.value} account={ingest_result.account} "
+        f"messages={len(ingest_result.messages)} wrote={out_path}"
+    )
+    return _INGEST_STATUS_TO_EXIT_CODE.get(ingest_result.status, 0)
+
+
+def _classify(args) -> int:
+    """UNPRIVILEGED-SIDE entry point: the ONLY command a scheduled coding
+    agent should ever call for real data. Never touches Gmail, never
+    holds a credential -- reads a drop file that only the privileged
+    ``ingest`` identity can write, and derives VERIFIED/BLOCKED from that
+    file's own ``status`` field. There is no ``--email-status`` flag here
+    for a caller to assert; the file's provenance (its restrictive
+    ownership/permissions, set by ``ingest``) is what makes it trustworthy,
+    not a claim typed on this command line.
+    """
+    in_path = Path(args.ingest_result)
+    try:
+        data = json.loads(in_path.read_text())
+        ingest_result = gmail_ingest.IngestionResult.from_json_dict(data)
+    except Exception as exc:
+        print(f"ERROR: cannot read --ingest-result {in_path}: {exc}", file=sys.stderr)
+        return UNEXPECTED_ERROR
+
+    if args.max_age_s is not None:
+        age = time.time() - in_path.stat().st_mtime
+        if age > args.max_age_s:
+            print(
+                f"REFUSED: {in_path} is {age:.0f}s old, older than --max-age-s "
+                f"{args.max_age_s:.0f}s -- the privileged ingest side may have "
+                "stopped running; not processing stale data as if fresh.",
+                file=sys.stderr,
+            )
+            return REFUSED
+
+    return _pipeline_from_ingest_result(ingest_result, kind=args.kind, args=args)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -411,6 +516,38 @@ def main(argv: list[str] | None = None) -> int:
         "providers -- only pass this with explicit operator approval",
     )
 
+    ingest_p = sub.add_parser(
+        "ingest",
+        help="PRIVILEGED SIDE (isolated deployment): fetch+verify only, writes a sanitized drop file",
+    )
+    ingest_p.add_argument("--client-secret", required=True)
+    ingest_p.add_argument("--token", required=True)
+    ingest_p.add_argument("--out", required=True, help="path to write the sanitized JSON drop file")
+    ingest_p.add_argument("--max-messages", type=int, default=50)
+    ingest_p.add_argument("--max-pages", type=int, default=5)
+    ingest_p.add_argument("--deadline", type=float, default=90.0)
+    ingest_p.add_argument("--state-dir", default=None)
+
+    classify_p = sub.add_parser(
+        "classify",
+        help="UNPRIVILEGED SIDE (isolated deployment): the only command a scheduled agent should call",
+    )
+    classify_p.add_argument("--kind", choices=["scan", "brief"], required=True)
+    classify_p.add_argument(
+        "--ingest-result", required=True, help="drop file written by a privileged `ingest` run"
+    )
+    classify_p.add_argument(
+        "--max-age-s",
+        type=float,
+        default=None,
+        help="refuse if the drop file is older than this many seconds (missed-run detection)",
+    )
+    classify_p.add_argument("--max-messages", type=int, default=50)
+    classify_p.add_argument("--state-dir", default=None)
+    classify_p.add_argument(
+        "--llm-policy", choices=["local-only", "combo-continuous"], default="local-only"
+    )
+
     args = parser.parse_args(argv)
     if args.command == "scan":
         return _run(args, kind="scan", use_llm=False)
@@ -422,6 +559,10 @@ def main(argv: list[str] | None = None) -> int:
         return _list_labels(args)
     if args.command == "draft":
         return _draft(args)
+    if args.command == "ingest":
+        return _ingest(args)
+    if args.command == "classify":
+        return _classify(args)
     return _run_live(args, kind=args.kind)
 
 
