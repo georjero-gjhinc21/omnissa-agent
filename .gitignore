@@ -1,0 +1,14 @@
+__pycache__/
+*.pyc
+.pytest_cache/
+*.egg-info/
+
+# runtime state/reports default outside the repo (~/.local/state/omnissa-agent);
+# this is a backstop only, never the primary control
+.agent/state/
+
+# Google OAuth credentials belong in ~/.config/omnissa-agent-google/, never
+# here -- these patterns are a backstop only, in case one lands by mistake
+client_secret*.json
+*token*.json
+
