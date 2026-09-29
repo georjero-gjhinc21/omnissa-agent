@@ -1,0 +1,41 @@
+[Unit]
+Description=Omnissa classification (hourly bounded scan) -- restricted identity, no Gmail/token access
+Wants=network-online.target
+After=network-online.target omnissa-ingest-scan.service
+
+[Service]
+Type=oneshot
+User=omnissa-analysis
+Group=omnissa-analysis
+ExecStart=/opt/omnissa-agent/venv/bin/python3 -m omnissa_agent.cli classify \
+  --kind scan \
+  --ingest-result /var/lib/omnissa-agent/drop/latest-scan.json \
+  --max-age-s 1800 \
+  --state-dir /var/lib/omnissa-analysis/state \
+  --report-group-readable
+TimeoutStartSec=180
+
+# Hardening: this identity is never in docker/sudo/adm -- see the
+# deploy script and docs/gmail-ingestion-security-review.md. It also
+# never touches an OAuth token; it only reads a sanitized drop file.
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictNamespaces=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+CapabilityBoundingSet=
+ReadWritePaths=/var/lib/omnissa-analysis
+ReadOnlyPaths=/var/lib/omnissa-agent/drop
+# Real content only ever needs to reach the local OmniRoute gateway
+# (combo-private/Ollama by default). Widening to combo-continuous is a
+# conscious, separate operator decision -- and would ALSO require
+# loosening this to allow real internet egress, not just a code flag.
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+IPAddressDeny=any
+IPAddressAllow=localhost

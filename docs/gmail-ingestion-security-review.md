@@ -142,6 +142,52 @@ enabled as a result (see HANDOFF.md). Resolving it requires an operator
 with sudo to run the commands in Option A or B above; nothing in this
 codebase can substitute for that.
 
+### 2026-09-29, third pass: the analysis step ALSO isolated, docker path re-affirmed BLOCKED
+
+The operator flagged that the deployed design still let the *analysis*
+step (Agent A/B classification, OmniRoute calls) be presented as an
+Orca automation -- which runs as `georjero`, carrying `docker`/`sudo`.
+"Do not present an Orca automation as isolated if it runs as georjero
+with Docker access" -- correct, and now changed:
+
+- Orca is **removed from the autonomous execution path entirely**.
+  There is no Orca automation in this design. A second dedicated system
+  identity, `omnissa-analysis`, runs `cli.py classify` via its own
+  systemd timers -- it is NOT in `docker`, `lxd`, `sudo`, or `adm`
+  (verified by `deploy-root.sh`'s own validation step, which actively
+  checks group membership rather than assuming `useradd` got it right).
+- `omnissa-analysis` reads `omnissa-ingest`'s sanitized drop files
+  (group `omnissa-readers`) and never touches a Gmail credential.
+  Network is restricted at the systemd unit level
+  (`IPAddressDeny=any` / `IPAddressAllow=localhost`) so even a code bug
+  that tried `combo-continuous` would be blocked by the OS, not just by
+  a default argument.
+- `georjero` gets a THIRD group, `omnissa-reports-readers`, read-only
+  access to the finished briefs/drafts `omnissa-analysis` produces --
+  the only thing georjero (and thus Orca/Claude, interactively) can see
+  of the autonomous pipeline's output.
+
+**Restating plainly, per the operator's explicit instruction not to
+call this PASS while the path remains**: `georjero` is still in
+`docker` (and `sudo`). This is unchanged by adding a second restricted
+identity -- two well-isolated services don't close a pre-existing
+escalation path on the identity that isn't one of them.
+**AGENT PRIVILEGE BOUNDARY: BLOCKED.** `deploy-root.sh` now prints this
+verdict explicitly in its own validation output (not just in this doc)
+so it can never be silently read as a clean pass.
+
+**Operator decision, not made here** (three real options, trade-offs
+only -- Docker config was not touched):
+
+| Option | Closes the path? | Cost |
+|---|---|---|
+| Remove `georjero` from `docker` (and/or `sudo`) | Yes, fully | Loses passwordless `docker` CLI for georjero's own workflows; `sudo docker ...` still works with the password |
+| Migrate to rootless Docker (`dockerd-rootless`) | Yes, fully -- container root is namespace-remapped, not real root | Real migration: existing containers/volumes/port-bindings need re-creating; out of scope for this project, mentioned for completeness only |
+| Accept the residual risk, documented | No | Isolation still fully defeats accidental/casual cross-identity access (a buggy agent genuinely cannot open the token file); does not defend against a deliberate escalation by georjero itself |
+
+None of these were applied. `deploy-root.sh` does not touch group
+membership or Docker configuration, per explicit instruction.
+
 ## 2. Third-party provider exposure via combo-continuous
 
 `combo-continuous`'s fallback chain mixes fully local `ollama-local`

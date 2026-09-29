@@ -177,6 +177,80 @@ def test_classify_accepts_fresh_drop_file_within_max_age(tmp_path):
     assert rc == 0
 
 
+def test_ingest_reports_partial_not_ok_when_deadline_hit(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(cli.google_oauth, "refresh_access_token", lambda cc, tp: "at")
+    monkeypatch.setattr(
+        cli.gmail_ingest,
+        "run_ingestion",
+        lambda *a, **k: gmail_ingest.IngestionResult(
+            status=gmail_ingest.IngestStatus.OK,
+            account="george@gjh-inc.com",
+            label_id="L1",
+            label_name="Archive_/@omnissa.com",
+            messages=[],
+            deadline_hit=True,
+        ),
+    )
+    out = tmp_path / "drop.json"
+    rc = cli.main(
+        [
+            "ingest",
+            "--client-secret", str(_fake_client_secret(tmp_path)),
+            "--token", str(_fake_token(tmp_path)),
+            "--out", str(out),
+            "--state-dir", str(tmp_path),
+        ]
+    )
+    assert rc == cli.PARTIAL
+    assert "status=PARTIAL" in capsys.readouterr().out
+
+
+def test_classify_report_group_readable_flag_controls_file_mode(tmp_path):
+    drop = tmp_path / "drop.json"
+    result = gmail_ingest.IngestionResult(status=gmail_ingest.IngestStatus.OK, account="x", label_id="L", label_name="L")
+    drop.write_text(json.dumps(result.to_json_dict()))
+
+    rc = cli.main(["classify", "--kind", "scan", "--ingest-result", str(drop), "--state-dir", str(tmp_path / "a")])
+    assert rc == 0
+    default_report = list((tmp_path / "a" / "reports").glob("*.md"))[0]
+    assert (default_report.stat().st_mode & 0o777) == 0o600
+
+    rc2 = cli.main(
+        [
+            "classify", "--kind", "scan", "--ingest-result", str(drop),
+            "--state-dir", str(tmp_path / "b"), "--report-group-readable",
+        ]
+    )
+    assert rc2 == 0
+    group_report = list((tmp_path / "b" / "reports").glob("*.md"))[0]
+    assert (group_report.stat().st_mode & 0o777) == 0o640
+
+
+def test_classify_reports_partial_and_surfaces_it_in_the_brief_text(tmp_path):
+    drop = tmp_path / "drop.json"
+    result = gmail_ingest.IngestionResult(
+        status=gmail_ingest.IngestStatus.OK,
+        account="george@gjh-inc.com",
+        label_id="L1",
+        label_name="Archive_/@omnissa.com",
+        messages=[
+            GmailMessage(
+                id="m1", subject="Omnissa update", snippet="hi",
+                sender="x@omnissa.com", date="2026-09-29", label_ids=("L1",),
+            )
+        ],
+        deadline_hit=True,
+    )
+    drop.write_text(json.dumps(result.to_json_dict()))
+
+    rc = cli.main(["classify", "--kind", "scan", "--ingest-result", str(drop), "--state-dir", str(tmp_path)])
+    assert rc == cli.PARTIAL
+
+    report = list((tmp_path / "reports").glob("*-scan.md"))[0].read_text()
+    assert "PARTIAL" in report
+    assert "VERIFIED (PARTIAL -- ingestion deadline reached)" in report
+
+
 def test_ingest_and_classify_end_to_end_produce_the_same_result_as_run(tmp_path, monkeypatch):
     """The split path and the single-process `run` path must agree."""
     fake_result = gmail_ingest.IngestionResult(

@@ -1,13 +1,14 @@
 #!/usr/bin/env bash
-# OPERATOR-RUN ONLY. Requires root. Reverses deploy-root.sh.
+# OPERATOR-RUN ONLY. Requires root. Reverses deploy-root.sh (both the
+# omnissa-ingest and omnissa-analysis identities).
 # Preserves the OAuth authorization (moves credentials back rather than
-# deleting them) and preserves the ingest-side checkpoint (copies it
-# next to the credentials so dedup history isn't silently lost).
-# Does NOT touch anything on the Google side -- the refresh token stays
-# valid; you can resume with `cli.py run`/`authorize` from georjero's
-# own account immediately after this.
+# deleting them) and preserves both identities' checkpoints. Does NOT
+# touch anything on the Google side -- the refresh token stays valid;
+# you can resume with `cli.py run`/`authorize` from georjero's own
+# account immediately after this.
 
 set -euo pipefail
+export PATH="/usr/sbin:/usr/bin:/sbin:/bin"
 
 if [[ $EUID -ne 0 ]]; then
   echo "Run this with sudo: sudo bash $0" >&2
@@ -16,18 +17,26 @@ fi
 
 ING_USER="omnissa-ingest"
 ING_HOME="/var/lib/omnissa-ingest"
+ANA_USER="omnissa-analysis"
+ANA_HOME="/var/lib/omnissa-analysis"
 DROP_DIR="/var/lib/omnissa-agent/drop"
 READ_GROUP="omnissa-readers"
+REPORTS_READ_GROUP="omnissa-reports-readers"
 CALLER_USER="georjero"
 RESTORE_DIR="/home/georjero/.config/omnissa-agent-google"
 CALLER_STATE_DIR="/home/georjero/.local/state/omnissa-agent"
 
 echo "== stop and remove scheduling =="
-systemctl disable --now omnissa-ingest-scan.timer omnissa-ingest-brief.timer 2>/dev/null || true
+systemctl disable --now omnissa-ingest-scan.timer omnissa-ingest-brief.timer \
+  omnissa-analysis-scan.timer omnissa-analysis-brief.timer 2>/dev/null || true
 rm -f /etc/systemd/system/omnissa-ingest-scan.service \
       /etc/systemd/system/omnissa-ingest-brief.service \
       /etc/systemd/system/omnissa-ingest-scan.timer \
-      /etc/systemd/system/omnissa-ingest-brief.timer
+      /etc/systemd/system/omnissa-ingest-brief.timer \
+      /etc/systemd/system/omnissa-analysis-scan.service \
+      /etc/systemd/system/omnissa-analysis-brief.service \
+      /etc/systemd/system/omnissa-analysis-scan.timer \
+      /etc/systemd/system/omnissa-analysis-brief.timer
 systemctl daemon-reload
 
 echo "== restore credentials to georjero's own storage (not deleted) =="
@@ -37,22 +46,32 @@ mkdir -p "$RESTORE_DIR"
 chown georjero:georjero "$RESTORE_DIR"/*.json 2>/dev/null || true
 chmod 600 "$RESTORE_DIR"/*.json 2>/dev/null || true
 
-echo "== preserve the ingest-side checkpoint (merge manually if you want combined dedup history) =="
-if [[ -f "$ING_HOME/state/checkpoint.json" ]]; then
-  mkdir -p "$CALLER_STATE_DIR"
+echo "== preserve both identities' checkpoints/reports (merge manually if wanted) =="
+mkdir -p "$CALLER_STATE_DIR"
+[[ -f "$ING_HOME/state/checkpoint.json" ]] && \
   cp "$ING_HOME/state/checkpoint.json" "$CALLER_STATE_DIR/checkpoint.from-ingest-identity.json"
-  chown georjero:georjero "$CALLER_STATE_DIR/checkpoint.from-ingest-identity.json"
+[[ -f "$ANA_HOME/state/checkpoint.json" ]] && \
+  cp "$ANA_HOME/state/checkpoint.json" "$CALLER_STATE_DIR/checkpoint.from-analysis-identity.json"
+if [[ -d "$ANA_HOME/state/reports" ]]; then
+  mkdir -p "$CALLER_STATE_DIR/reports-from-analysis-identity"
+  cp -r "$ANA_HOME/state/reports/." "$CALLER_STATE_DIR/reports-from-analysis-identity/" 2>/dev/null || true
 fi
+chown -R georjero:georjero "$CALLER_STATE_DIR" 2>/dev/null || true
 
-echo "== remove the deployed code copy and drop directory (contains no secrets) =="
+echo "== remove the deployed code copy and drop directory (contain no secrets) =="
 rm -rf /opt/omnissa-agent
 rm -rf "$DROP_DIR"
 
-echo "== remove the service identity =="
+echo "== remove the service identities =="
 userdel "$ING_USER" 2>/dev/null || true
 groupdel "$ING_USER" 2>/dev/null || true
+userdel "$ANA_USER" 2>/dev/null || true
+groupdel "$ANA_USER" 2>/dev/null || true
 gpasswd -d "$CALLER_USER" "$READ_GROUP" 2>/dev/null || true
+gpasswd -d "$CALLER_USER" "$REPORTS_READ_GROUP" 2>/dev/null || true
 groupdel "$READ_GROUP" 2>/dev/null || true
+groupdel "$REPORTS_READ_GROUP" 2>/dev/null || true
 
 echo "Rollback complete. Credentials restored to $RESTORE_DIR."
+echo "Preserved checkpoints/reports (if any) copied under $CALLER_STATE_DIR."
 echo "Resume manual use with: python3 -m omnissa_agent.cli run --kind scan --client-secret $RESTORE_DIR/client_secret.json --token $RESTORE_DIR/token.json"

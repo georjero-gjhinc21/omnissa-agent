@@ -39,7 +39,7 @@ at a real, unverified fetch: nothing here checks that the JSON actually
 came from a verified source. Use ``run`` for anything live.
 
 Exit codes (a scheduler should branch on these, not on stdout text):
-  0  ran normally (new findings or none -- both are success)
+  0  ran normally, COMPLETE (new findings or none -- both are success)
   2  REFUSED: boundary/account/label check failed (or, for scan/brief,
      --email-status did not start with "VERIFIED"); nothing processed
   3  ran, but the LLM summary step was deferred (every omniroute backend
@@ -48,6 +48,14 @@ Exit codes (a scheduler should branch on these, not on stdout text):
      nothing partially written for that run
   5  RATE_LIMITED: Gmail itself is rate-limiting this account -- retry
      later, this is not a configuration problem
+  6  PARTIAL: the ingestion deadline was reached before every available
+     message was fetched. This is NOT the same as exit 0 -- do not treat
+     it as a normal success in monitoring/alerting. Data collected so
+     far is genuine and was written; unprocessed message ids were never
+     marked as seen, so the next run picks them up rather than silently
+     skipping them. The brief itself also says "VERIFIED (PARTIAL --
+     ingestion deadline reached)" so this is visible in the report text
+     too, not only in the exit code.
 """
 
 from __future__ import annotations
@@ -71,6 +79,7 @@ REFUSED = 2
 LLM_DEFERRED = 3
 UNEXPECTED_ERROR = 4
 RATE_LIMITED = 5
+PARTIAL = 6  # ingestion deadline reached -- data is real but incomplete, not a failure
 
 _INGEST_STATUS_TO_EXIT_CODE = {
     gmail_ingest.IngestStatus.AUTH_FAILURE: REFUSED,
@@ -101,7 +110,13 @@ def _messages_from_json(raw: str) -> list[GmailMessage]:
     ]
 
 
-def _write_report(kind: str, report, *, state_base=None) -> Path:
+def _write_report(kind: str, report, *, state_base=None, file_mode: int = 0o600) -> Path:
+    """``file_mode`` defaults to owner-only (0600) for manual/single-process
+    use. The privilege-separated deployment passes 0640 so a dedicated
+    reader group (never ``georjero`` writing, only reading) can see the
+    output -- the directory's own setgid bit (set by the deploy script,
+    not here) makes new files inherit that group automatically.
+    """
     reports_dir = state_mod.state_dir(state_base) / "reports"
     reports_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
     ts = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
@@ -115,7 +130,7 @@ def _write_report(kind: str, report, *, state_base=None) -> Path:
                 f"Confirm before sending: {d.confirm_before_sending}\n"
             )
     path.write_text(text)
-    path.chmod(0o600)
+    path.chmod(file_mode)
     return path
 
 
@@ -289,8 +304,9 @@ def _pipeline_from_ingest_result(ingest_result, *, kind: str, args) -> int:
         print(f"{ingest_result.status.value}: {ingest_result.reason}", file=sys.stderr)
         return _INGEST_STATUS_TO_EXIT_CODE[ingest_result.status]
 
+    status_word = "VERIFIED (PARTIAL -- ingestion deadline reached)" if ingest_result.deadline_hit else "VERIFIED"
     email_status = (
-        f"VERIFIED account={ingest_result.account} label_id={ingest_result.label_id} "
+        f"{status_word} account={ingest_result.account} label_id={ingest_result.label_id} "
         f"label_name={ingest_result.label_name} (runtime-checked by gmail_ingest.run_ingestion)"
     )
     llm_combo = router.LOCAL_ONLY_COMBO if args.llm_policy == "local-only" else router.DEFAULT_COMBO
@@ -304,19 +320,29 @@ def _pipeline_from_ingest_result(ingest_result, *, kind: str, args) -> int:
         max_messages=args.max_messages,
         state_base=state_base,
     )
-    path = _write_report(kind, report, state_base=state_base)
+    file_mode = 0o640 if getattr(args, "report_group_readable", False) else 0o600
+    path = _write_report(kind, report, state_base=state_base, file_mode=file_mode)
     print(f"wrote {path}")
     print(
         f"account={ingest_result.account} label={ingest_result.label_name} "
         f"messages_seen={len(ingest_result.messages)} "
         f"duplicates_skipped={ingest_result.duplicates_skipped} "
         f"rejected_stale_label={len(ingest_result.rejected_stale_label_ids)} "
-        f"malformed={len(ingest_result.malformed_ids)}"
+        f"malformed={len(ingest_result.malformed_ids)} "
+        f"deadline_hit={ingest_result.deadline_hit}"
     )
     print(report.brief_markdown)
     if report.llm_backend:
         print(f"LLM backend used: {report.llm_backend}", file=sys.stderr)
 
+    if ingest_result.deadline_hit:
+        print(
+            "PARTIAL: ingestion deadline reached -- not all available messages were "
+            "processed this run. Unprocessed messages are NOT marked seen and will "
+            "be picked up on the next run, not silently dropped.",
+            file=sys.stderr,
+        )
+        return PARTIAL
     if report.llm_deferred:
         print("LLM summary deferred (all omniroute backends failed this run)", file=sys.stderr)
         return LLM_DEFERRED
@@ -392,10 +418,18 @@ def _ingest(args) -> int:
     tmp_path.chmod(0o640)  # owner rw, group r -- the narrow one-way handoff
     tmp_path.replace(out_path)  # atomic -- a reader never sees a partial file
 
+    status_label = "PARTIAL" if ingest_result.deadline_hit else ingest_result.status.value
     print(
-        f"status={ingest_result.status.value} account={ingest_result.account} "
+        f"status={status_label} account={ingest_result.account} "
         f"messages={len(ingest_result.messages)} wrote={out_path}"
     )
+    if ingest_result.status == gmail_ingest.IngestStatus.OK and ingest_result.deadline_hit:
+        print(
+            "PARTIAL: deadline reached before all messages were fetched -- "
+            "unprocessed ids were NOT marked seen, next run will retry them.",
+            file=sys.stderr,
+        )
+        return PARTIAL
     return _INGEST_STATUS_TO_EXIT_CODE.get(ingest_result.status, 0)
 
 
@@ -546,6 +580,13 @@ def main(argv: list[str] | None = None) -> int:
     classify_p.add_argument("--state-dir", default=None)
     classify_p.add_argument(
         "--llm-policy", choices=["local-only", "combo-continuous"], default="local-only"
+    )
+    classify_p.add_argument(
+        "--report-group-readable",
+        action="store_true",
+        help="write reports mode 0640 instead of 0600 -- for the privilege-separated "
+        "deployment, where a dedicated reader group (not the analysis identity's own "
+        "group) is meant to see the output. Off by default (owner-only).",
     )
 
     args = parser.parse_args(argv)

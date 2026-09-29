@@ -137,6 +137,90 @@ new split path, re-run all tests, and only then move to Orca automation
 creation (disabled first, per the operator's Phase 5 procedure) for the
 `classify` side.
 
+## 2026-09-29, same day, next pass: operator already ran the script; audit found real bugs; Orca removed from execution path
+
+Discovered live (unprompted -- operator hadn't said so yet) that
+`deploy-root.sh` had already been run: `omnissa-ingest` user existed,
+credentials moved, code deployed, units installed, timers correctly
+left disabled. Ran the real negative tests as georjero right then:
+confirmed Permission denied on both credential files and on writing
+`cli.py`, and `systemctl start` required interactive auth. Good
+evidence, but the operator explicitly asked for an audit of the SCRIPT
+itself before trusting it further, and separately said the previous
+report's "Orca automation for classify" plan was unacceptable since
+Orca only ever runs as georjero (docker/sudo). Found and fixed real
+issues:
+
+- **PARTIAL/DEFERRED visibility bug** (the operator's specific
+  callout): a deadline-hit ingestion returned bare `status=OK`, making
+  an incomplete run look identical to a complete one in logs/exit code.
+  Fixed: new exit code `PARTIAL=6` (distinct from 0), `_ingest`/
+  `classify`/`run` all print `status=PARTIAL` and the brief text itself
+  now says `VERIFIED (PARTIAL -- ingestion deadline reached)` --
+  visible in the artifact, not just stderr. Confirmed (already true,
+  now also has a dedicated regression test) that unfetched message ids
+  are never marked seen in either checkpoint, so a partial run's
+  leftovers get picked up next time, not silently dropped.
+- **Script hardening**: `deploy-root.sh`/`rollback-root.sh` now set an
+  explicit `PATH=/usr/sbin:/usr/bin:/sbin:/bin` at the top (defense in
+  depth against a manipulated inherited PATH, even though sudo's
+  default `secure_path` likely already prevents this); refuse to run
+  from an uncommitted/dirty `$REPO_SRC` and print the exact commit SHA
+  being deployed (closes "the agent silently changes what gets
+  deployed without the operator noticing" -- the operator now always
+  sees the SHA); credential `mv` now explicitly rejects a symlink
+  source before moving (TOCTOU guard); home directories get an
+  explicit `chmod 750` rather than trusting distro `useradd` defaults.
+- **Architecture change (Phase 2's explicit fallback instruction,
+  since Orca cannot execute as a restricted identity)**: added a SECOND
+  dedicated system identity, `omnissa-analysis`, running
+  `cli.py classify` (Agent A/B + OmniRoute) via its own two systemd
+  timers, offset 7-10 minutes after the ingest timers. Verified by the
+  deploy script itself (not just assumed) to carry none of
+  `docker`/`lxd`/`sudo`/`adm`. Network restricted to loopback at the
+  systemd unit level (`IPAddressDeny=any`/`IPAddressAllow=localhost`)
+  so even a code bug reaching for `combo-continuous` would be blocked
+  by the OS. Orca is no longer part of the autonomous path at all --
+  both stages are systemd-timer-driven; georjero/Orca/Claude can only
+  ever read the output (new `omnissa-reports-readers` group), never
+  trigger or configure either identity.
+- `_write_report` gained a `file_mode` parameter (`classify
+  --report-group-readable` -> 0640) since the old hardcoded 0600 would
+  have defeated the new read-only group handoff for analysis's output.
+- New `docs/operations-record.md`: full architecture table (who runs
+  what, what network each identity can reach), all unit names/schedule/
+  timezone, health/log/status commands, the exit-code table (now
+  including PARTIAL=6), checkpoint recovery, data-retention gap (flagged,
+  not fixed -- reports/drafts have no pruning yet), the unconditional
+  autonomous-action boundary restatement, and a numbered deployment
+  checklist with explicit PASS/FAIL gates ending in the exact next
+  command.
+- `docs/gmail-ingestion-security-review.md` updated: restates plainly,
+  per the operator's explicit instruction, that **AGENT PRIVILEGE
+  BOUNDARY: BLOCKED** while georjero is in `docker` -- this is now also
+  printed by `deploy-root.sh`'s own validation output as a labeled
+  INFO/STATUS line, never folded into "ALL CHECKS PASSED". Three
+  concrete operator options (remove from docker/sudo; migrate to
+  rootless Docker; accept and document) given as trade-offs, none
+  applied -- Docker config and georjero's groups were not touched.
+- New tests: `tests/test_deploy_script_safety.py` (15 static checks on
+  both scripts and all 8 unit files -- PATH hardening, dirty-tree
+  refusal, symlink guard, analysis identity's group exclusions,
+  loopback-only network on analysis units, absolute python paths,
+  shell syntax), plus PARTIAL-exit-code and checkpoint-correctness
+  tests in `test_gmail_ingest.py`/`test_cli_ingest_classify.py`.
+  **Full suite: 117/117 green.** `infra/omniroute/tests/test-omniroute.sh`:
+  23/23 green, unaffected.
+
+Next action: operator re-runs (idempotent)
+`sudo bash infra/omnissa-ingest/deploy-root.sh` to pick up the hardening
+fixes and add the `omnissa-analysis` identity, reviews its output
+(expect `ALL FILE-PERMISSION VALIDATION CHECKS PASSED` plus the
+standing docker INFO line), then works through
+`docs/operations-record.md` §10's numbered checklist (manual
+single-shot trigger of each service, inspect, only then enable timers).
+This session still cannot run any of that -- no sudo password.
+
 ---
 
 - Status: scaffolded 2026-09-29, Milestone 1 in progress

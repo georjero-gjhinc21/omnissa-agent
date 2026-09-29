@@ -197,6 +197,50 @@ def test_total_deadline_stops_pagination_early_with_partial_ok_result(tmp_path, 
     assert len(result.messages) <= 1  # stopped well before all 3 pages/messages
 
 
+def test_partial_run_does_not_falsely_mark_unfetched_messages_seen(tmp_path, monkeypatch):
+    """The exact regression the operator flagged: a truncated scan must
+    not mark messages it never actually fetched as complete -- otherwise
+    a later run would silently skip real, never-processed mail forever.
+    """
+    client = FakeClient(
+        pages=[(["m1", "m2", "m3"], None)],
+        messages={"m1": _raw_message("m1"), "m2": _raw_message("m2"), "m3": _raw_message("m3")},
+    )
+    clock = {"t": 0.0}
+
+    def fake_monotonic():
+        clock["t"] += 1.0
+        return clock["t"]
+
+    # deadline_at is computed once at call start as time.monotonic() + deadline_s;
+    # make the SECOND call (checked before the first per-message fetch) already past it
+    monkeypatch.setattr(gi.time, "monotonic", fake_monotonic)
+    result = gi.run_ingestion(client, state_base=tmp_path, deadline_s=1.5)
+
+    assert result.deadline_hit is True
+    fetched_ids = {m.id for m in result.messages}
+    unfetched = {"m1", "m2", "m3"} - fetched_ids
+    assert unfetched, "test setup should leave at least one message unfetched"
+
+    from omnissa_agent import state as state_mod
+
+    st = state_mod.load_state(tmp_path)
+    for mid in unfetched:
+        assert mid not in st["gmail_ingested_ids"], (
+            f"{mid} was never fetched but got marked seen -- it would be "
+            "silently skipped forever on the next run"
+        )
+
+    # a follow-up run (deadline no longer a factor) must pick up what was missed
+    client2 = FakeClient(
+        pages=[(["m1", "m2", "m3"], None)],
+        messages={"m1": _raw_message("m1"), "m2": _raw_message("m2"), "m3": _raw_message("m3")},
+    )
+    monkeypatch.undo()
+    second = gi.run_ingestion(client2, state_base=tmp_path, deadline_s=90.0)
+    assert unfetched <= {m.id for m in second.messages}
+
+
 def test_deadline_not_hit_reports_false_on_a_fast_normal_run(tmp_path):
     client = FakeClient(pages=[(["m1"], None)], messages={"m1": _raw_message("m1")})
     result = gi.run_ingestion(client, state_base=tmp_path, deadline_s=90.0)
