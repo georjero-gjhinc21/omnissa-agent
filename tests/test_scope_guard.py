@@ -119,12 +119,18 @@ def test_custom_allowed_labels_override_is_honored_for_non_default_configs():
         )
 
 
-def test_google_and_zoom_are_not_yet_in_the_allowlist():
-    """barracuda was confirmed via `cli.py list-labels` (2026-09-30) and
-    is now live in config/partners.yaml. google/zoom were requested in
-    conversation but never confirmed the same way -- carahsoft/zireh's
-    real labels (no ".com") already proved the naming pattern isn't
-    reliable enough to guess from, so these two stay commented out
-    rather than added speculatively."""
-    assert "Archive_/@google.com" not in ALLOWED_LABELS
-    assert "Archive_/@zoom.com" not in ALLOWED_LABELS
+def test_google_and_friends_use_the_translated_search_box_label_names():
+    """google/zoom/zoho/verizon/udemy/salesforce/nvidia were given as
+    Gmail search-box strings ("label:archive_-@google.com", ...), not
+    raw list-labels output -- translated to the "Archive_/@<domain>"
+    pattern the other confirmed entries share. Not independently
+    re-confirmed; if any is wrong it just shows up as a harmless
+    skipped_partners entry next run (see gmail_ingest.py), never a
+    wrong fetch."""
+    assert "Archive_/@google.com" in ALLOWED_LABELS
+    assert "Archive_/@zoom.us" in ALLOWED_LABELS  # note .us, not .com
+    assert "Archive_/@zohocorp.com" in ALLOWED_LABELS
+    assert "Archive_/@verizon.com" in ALLOWED_LABELS
+    assert "Archive_/@udemy.com" in ALLOWED_LABELS
+    assert "Archive_/@salesforce.com" in ALLOWED_LABELS
+    assert "Archive_/@nvidia.com" in ALLOWED_LABELS

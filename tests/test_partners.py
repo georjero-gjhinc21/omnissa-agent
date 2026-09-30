@@ -50,12 +50,8 @@ def test_load_partner_allowlist_from_the_real_repo_config():
     ids = {p.id for p in result}
     assert ids == {
         "omnissa", "microsoft", "barracuda", "tdsynnex", "arrow", "carahsoft", "planetbids", "zireh",
+        "google", "zoom", "zoho", "verizon", "udemy", "salesforce", "nvidia",
     }
-    # google/zoom are deliberately commented out pending a confirmed
-    # exact label name via `cli.py list-labels` -- must not silently
-    # appear just because someone asked for them in conversation.
-    assert "google" not in ids
-    assert "zoom" not in ids
 
 
 def test_carahsoft_and_zireh_labels_have_no_dot_com_suffix_exactly_as_confirmed():

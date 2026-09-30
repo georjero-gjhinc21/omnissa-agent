@@ -33,16 +33,28 @@ partners:
   - id: zireh
     label: "Archive_/@zireh"
 
-# UNVERIFIED -- requested ("include also google, zoom") but NOT
-# confirmed via `cli.py list-labels` against the real mailbox. Given
-# carahsoft/zireh above just proved this operator's real label names
-# don't reliably follow the "@<domain>.com" pattern, guessing the exact
-# string for these two and adding them live would risk silently
-# fetching the wrong label if a differently-intended one happens to
-# match -- or just never resolving if it doesn't. Run `cli.py
-# list-labels` and tell me (or edit this file with) the exact strings,
-# then uncomment:
-#  - id: google
-#    label: "Archive_/@google.com"
-#  - id: zoom
-#    label: "Archive_/@zoom.com"
+  # Given as Gmail SEARCH-BOX syntax ("label:archive_-@google.com", ...),
+  # not raw list-labels output -- Gmail's search suggestions render a
+  # nested label's "/" as "-" for display, but the underlying label
+  # NAME (what list-labels prints, what resolve_label matches exactly)
+  # still uses "/". Translated here to match the established
+  # "Archive_/@<domain>" pattern the other six confirmed entries share.
+  # NOT independently re-confirmed via list-labels -- if any of these
+  # doesn't actually match, it just shows up as a non-fatal
+  # skipped_partners entry next run (see gmail_ingest.py), never a
+  # wrong fetch. nvidia is back (previously dropped only because it
+  # wasn't on the prior confirmed list; now explicitly given again).
+  - id: google
+    label: "Archive_/@google.com"
+  - id: zoom
+    label: "Archive_/@zoom.us"
+  - id: zoho
+    label: "Archive_/@zohocorp.com"
+  - id: verizon
+    label: "Archive_/@verizon.com"
+  - id: udemy
+    label: "Archive_/@udemy.com"
+  - id: salesforce
+    label: "Archive_/@salesforce.com"
+  - id: nvidia
+    label: "Archive_/@nvidia.com"
