@@ -46,24 +46,48 @@ georjero (interactive review, via this project's terminals) -- NOT automated bey
 
 ## 2. Units, schedule, timezone
 
-System timezone confirmed `America/Chicago` (`timedatectl`), so all
+**Exactly 6 unit files, not 8.** `omnissa-analysis` has no independent
+timer — it is activated exclusively by the matching ingest service's
+`OnSuccess=` the moment that run exits 0. This is a deliberate fix, not
+an oversight: an independently-scheduled analysis timer (fixed minute
+offset after ingest) could race, or process a drop file from an ingest
+run that failed or hit its deadline (PARTIAL, exit 6) as if it were
+fresh, successful data. Since a oneshot service's nonzero exit is
+"failed" in systemd's own accounting by default, `OnSuccess=` correctly
+never fires for a PARTIAL or failed ingest — the next scheduled ingest
+run simply retries (unprocessed message ids were never marked seen).
+
+System timezone confirmed `America/Chicago` (`timedatectl`), so the
 `OnCalendar=` specs below are already local/Central time, no explicit
 TZ needed.
 
-| Unit | Fires | Purpose |
-|---|---|---|
-| `omnissa-ingest-scan.timer` | hourly, `:00` (+random ≤30s) | trigger `omnissa-ingest-scan.service` |
-| `omnissa-analysis-scan.timer` | hourly, `:07` (+random ≤30s) | trigger `omnissa-analysis-scan.service` (reads the `:00` drop) |
-| `omnissa-ingest-brief.timer` | daily `07:45` | trigger `omnissa-ingest-brief.service` |
-| `omnissa-analysis-brief.timer` | daily `07:55` | trigger `omnissa-analysis-brief.service` (finished brief ready before 08:00) |
+| Unit | Identity | Fires / triggered by | Purpose |
+|---|---|---|---|
+| `omnissa-ingest-scan.timer` | n/a (timer) | hourly, `:00` (+random ≤30s) | trigger `omnissa-ingest-scan.service` |
+| `omnissa-ingest-scan.service` | `omnissa-ingest` | by the timer above | fetch+verify, write `latest-scan.json`; on clean exit, `OnSuccess=` fires `omnissa-analysis-scan.service` |
+| `omnissa-analysis-scan.service` | `omnissa-analysis` | `OnSuccess=` from `omnissa-ingest-scan.service` only (no timer) | classify + draft from `latest-scan.json`, write the hourly report |
+| `omnissa-ingest-brief.timer` | n/a (timer) | daily `07:45` | trigger `omnissa-ingest-brief.service` |
+| `omnissa-ingest-brief.service` | `omnissa-ingest` | by the timer above | fetch+verify, write `latest-brief.json`; on clean exit, `OnSuccess=` fires `omnissa-analysis-brief.service` |
+| `omnissa-analysis-brief.service` | `omnissa-analysis` | `OnSuccess=` from `omnissa-ingest-brief.service` only (no timer) | classify + draft from `latest-brief.json` (LLM summary), write the daily brief — ready before 08:00 |
 
-All four `.timer` units have `Persistent=true` — a missed run (machine
+Both `.timer` units have `Persistent=true` — a missed run (machine
 off/asleep) fires once at next boot instead of silently vanishing.
+
+### Atomic publish / stale-data behavior
+
+- `ingest` writes to a `.tmp` path and atomically `replace()`s the real
+  drop file — `classify` can only ever observe the complete old file or
+  the complete new one, never a partial write, independent of any
+  systemd ordering.
+- `classify --max-age-s` (1800s for both pipelines) refuses to process
+  a drop file older than that, in case it's ever triggered out-of-band
+  against stale data (manual testing, a restarted OnSuccess chain, etc.)
+  — the normal OnSuccess-chained path is always seconds-fresh.
 
 ## 3. Health, status, logs
 
 ```sh
-systemctl list-timers 'omnissa-*'                 # next/last run times for all 4
+systemctl list-timers 'omnissa-*'                 # next/last run times for the 2 real timers
 systemctl status omnissa-ingest-scan.service       # last run's result
 systemctl status omnissa-analysis-scan.service
 journalctl -u omnissa-ingest-scan.service -n 20    # georjero CAN read these (adm group) --
@@ -158,11 +182,12 @@ Every autonomous run (both systemd-timer identities) is restricted to:
 ## 9. Disable / rollback
 
 ```sh
-# stop the autonomous service, keep everything else in place
-sudo systemctl disable --now omnissa-ingest-scan.timer omnissa-ingest-brief.timer \
-  omnissa-analysis-scan.timer omnissa-analysis-brief.timer
+# stop the autonomous service, keep everything else in place --
+# disabling the 2 real timers is sufficient: with no ingest run, there
+# is nothing for OnSuccess= to ever chain into
+sudo systemctl disable --now omnissa-ingest-scan.timer omnissa-ingest-brief.timer
 
-# full teardown, credentials preserved (not deleted)
+# full teardown, credentials + checkpoints + any unconsumed drop data preserved (not deleted)
 sudo bash infra/omnissa-ingest/rollback-root.sh
 ```
 
@@ -178,24 +203,29 @@ proceeding.
 3. `bash infra/omniroute/tests/test-omniroute.sh` (from
    `system-prompts/infra/omniroute/`) → expect all passing.
 4. **[Operator, privileged]** `sudo bash infra/omnissa-ingest/deploy-root.sh`
-   → expect `ALL FILE-PERMISSION VALIDATION CHECKS PASSED` at the end.
-   The docker-group INFO line will still print — that's expected, not a
-   failure, and is a separate, standing decision (see
-   `docs/gmail-ingestion-security-review.md`).
-5. **[Operator, manual, once]** Trigger each service once by hand and
-   inspect the result before trusting the timer:
+   → expect `ALL FILE-PERMISSION VALIDATION CHECKS PASSED (SCHEDULED-AGENT
+   ISOLATION: PASS)`. A separate `OPERATOR ACCOUNT RISK` block always
+   prints too — that's expected, not a failure, and describes a
+   standing decision about `georjero`'s own account, not this script's
+   isolation boundary (see `docs/gmail-ingestion-security-review.md`).
+5. **[Operator, manual, once]** Trigger the ingest service once by hand
+   — its `OnSuccess=` fires the matching analysis service automatically
+   on a clean exit, so triggering `omnissa-analysis-*` directly isn't
+   the normal path (only useful for isolated debugging):
    ```sh
-   sudo systemctl start omnissa-ingest-scan.service && sudo systemctl status omnissa-ingest-scan.service
-   sudo journalctl -u omnissa-ingest-scan.service -n 20
-   sudo systemctl start omnissa-analysis-scan.service && sudo systemctl status omnissa-analysis-scan.service
-   sudo journalctl -u omnissa-analysis-scan.service -n 20
+   sudo systemctl start omnissa-ingest-scan.service
+   sudo systemctl status omnissa-ingest-scan.service omnissa-analysis-scan.service
+   sudo journalctl -u omnissa-ingest-scan.service -u omnissa-analysis-scan.service -n 40
    cat /var/lib/omnissa-analysis/state/reports/<latest>.md
    ```
-   **Gate: both exit 0 (or 6/PARTIAL with a sane reason), the report
-   reads correctly, no error in the journal.**
-6. Only after step 5 passes: `sudo systemctl enable --now omnissa-ingest-scan.timer omnissa-analysis-scan.timer omnissa-ingest-brief.timer omnissa-analysis-brief.timer`.
-7. `systemctl list-timers 'omnissa-*'` → confirm all four show a future
-   `NEXT` time and `enabled`.
+   **Gate: ingest exits 0 (or 6/PARTIAL with a sane reason — in which
+   case analysis correctly does NOT run this cycle, by design), analysis
+   then runs and exits 0, the report reads correctly, no error in the
+   journal.**
+6. Only after step 5 passes: `sudo systemctl enable --now omnissa-ingest-scan.timer omnissa-ingest-brief.timer`.
+7. `systemctl list-timers 'omnissa-*'` → confirm both show a future
+   `NEXT` time and `enabled`. `omnissa-analysis-*.service` will not
+   appear in `list-timers` (correct — they have no timer of their own).
 
 **Next command for the operator to run, only after reviewing this
 document and the diff**: step 4 above,

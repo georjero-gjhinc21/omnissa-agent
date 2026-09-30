@@ -167,14 +167,50 @@ with Docker access" -- correct, and now changed:
   the only thing georjero (and thus Orca/Claude, interactively) can see
   of the autonomous pipeline's output.
 
-**Restating plainly, per the operator's explicit instruction not to
-call this PASS while the path remains**: `georjero` is still in
-`docker` (and `sudo`). This is unchanged by adding a second restricted
-identity -- two well-isolated services don't close a pre-existing
-escalation path on the identity that isn't one of them.
-**AGENT PRIVILEGE BOUNDARY: BLOCKED.** `deploy-root.sh` now prints this
-verdict explicitly in its own validation output (not just in this doc)
-so it can never be silently read as a clean pass.
+### 2026-09-29, fourth pass: precise split, corrected from a prior over-merged verdict
+
+An earlier version of this doc (and of `deploy-root.sh`'s own output)
+reported a single merged `AGENT PRIVILEGE BOUNDARY: BLOCKED` verdict.
+The operator correctly pushed back: that conflated two unrelated
+findings, and risked reading as "the scheduled-agent design has a flaw"
+when it doesn't. Corrected to two separate findings, verified live:
+
+**1. SCHEDULED-AGENT ISOLATION: PASS.** `omnissa-analysis` has no path
+to `omnissa-ingest`'s credential or to root:
+- `id omnissa-ingest` (live): `groups=982(omnissa-ingest)` -- no
+  supplementary groups at all.
+- `omnissa-analysis` (per `useradd`/`usermod` calls in `deploy-root.sh`,
+  re-verified live the moment it's created): primary group
+  `omnissa-analysis` plus supplementary `omnissa-readers` only -- never
+  `docker`, `lxd`, `sudo`, or `adm`. `deploy-root.sh` actively checks
+  this (`for bad in docker lxd sudo adm`) rather than assuming
+  `useradd` got it right.
+- The credential directory (`/var/lib/omnissa-ingest/google/`, mode
+  `700`, owner `omnissa-ingest`) has zero group/other bits -- kernel-
+  enforced, no group `omnissa-analysis` is in can reach it.
+- `omnissa-analysis` cannot write `/opt/omnissa-agent` (root-owned),
+  cannot reach the Docker socket (not in `docker`, socket is
+  `root:docker 660`), cannot `sudo`, cannot control `omnissa-ingest`'s
+  systemd unit (no sudoers/polkit rule grants it anything).
+- Live evidence for `georjero` specifically (same tests apply): reading
+  `token.json`/`client_secret.json` → Permission denied; writing the
+  deployed `cli.py` → Permission denied; `systemctl start
+  omnissa-ingest-scan.service` → interactive authentication required.
+
+**2. OPERATOR ACCOUNT RISK: `georjero` retains root-equivalent Docker
+access.** `docker version` succeeds with zero authentication beyond the
+existing session (confirmed live: real server response, no password).
+This is a fact about the `georjero` account's own group memberships --
+it exists independent of whether `omnissa-ingest`/`omnissa-analysis`
+are deployed at all, and there is no path FROM either scheduled
+identity TO `georjero`'s privileges (the arrows only ever point the
+other way: `georjero` reads their sanitized output; neither one can be
+influenced by `georjero` beyond that read). **Removing `georjero` from
+`docker` is therefore not required for the scheduled-agent boundary to
+be correctly isolated** -- it only matters if the operator separately
+wants to close `georjero`'s own pre-existing path to root.
+`deploy-root.sh`'s validation output now prints these as two clearly
+separated blocks, never merged into one verdict.
 
 **Operator decision, not made here** (three real options, trade-offs
 only -- Docker config was not touched):

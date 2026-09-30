@@ -2,6 +2,15 @@
 Description=Omnissa Gmail ingestion (hourly bounded scan) -- privileged identity only
 Wants=network-online.target
 After=network-online.target
+# Real success-triggered chaining, not a fixed time offset: analysis
+# only ever runs immediately after THIS run's clean success. A oneshot
+# service that exits nonzero -- including exit 6 (PARTIAL, deadline
+# hit) -- is "failed" in systemd's own accounting by default, so
+# OnSuccess= correctly does NOT fire for it. A partial/failed ingest
+# therefore never produces a fresh, success-looking brief; the next
+# scheduled ingest run picks up where it left off instead (unprocessed
+# ids were never marked seen -- see gmail_ingest.py).
+OnSuccess=omnissa-analysis-scan.service
 
 [Service]
 Type=oneshot

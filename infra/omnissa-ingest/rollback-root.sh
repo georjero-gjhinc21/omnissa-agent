@@ -27,8 +27,11 @@ RESTORE_DIR="/home/georjero/.config/omnissa-agent-google"
 CALLER_STATE_DIR="/home/georjero/.local/state/omnissa-agent"
 
 echo "== stop and remove scheduling =="
-systemctl disable --now omnissa-ingest-scan.timer omnissa-ingest-brief.timer \
-  omnissa-analysis-scan.timer omnissa-analysis-brief.timer 2>/dev/null || true
+# Only omnissa-ingest has timers (2) -- omnissa-analysis is activated
+# exclusively via OnSuccess=, no independent timer to disable. The
+# *.timer entries for omnissa-analysis are removed anyway in case an
+# older revision of deploy-root.sh installed them.
+systemctl disable --now omnissa-ingest-scan.timer omnissa-ingest-brief.timer 2>/dev/null || true
 rm -f /etc/systemd/system/omnissa-ingest-scan.service \
       /etc/systemd/system/omnissa-ingest-brief.service \
       /etc/systemd/system/omnissa-ingest-scan.timer \
@@ -46,7 +49,7 @@ mkdir -p "$RESTORE_DIR"
 chown georjero:georjero "$RESTORE_DIR"/*.json 2>/dev/null || true
 chmod 600 "$RESTORE_DIR"/*.json 2>/dev/null || true
 
-echo "== preserve both identities' checkpoints/reports (merge manually if wanted) =="
+echo "== preserve both identities' checkpoints/reports/unconsumed drop data =="
 mkdir -p "$CALLER_STATE_DIR"
 [[ -f "$ING_HOME/state/checkpoint.json" ]] && \
   cp "$ING_HOME/state/checkpoint.json" "$CALLER_STATE_DIR/checkpoint.from-ingest-identity.json"
@@ -56,9 +59,20 @@ if [[ -d "$ANA_HOME/state/reports" ]]; then
   mkdir -p "$CALLER_STATE_DIR/reports-from-analysis-identity"
   cp -r "$ANA_HOME/state/reports/." "$CALLER_STATE_DIR/reports-from-analysis-identity/" 2>/dev/null || true
 fi
+# Do NOT delete the drop directory's only copy sight-unseen: a drop file
+# that ingest wrote but analysis hasn't yet consumed (e.g. rollback runs
+# in the narrow window between an ingest success and its OnSuccess=
+# analysis run finishing) would otherwise be lost. Preserve every file
+# found there, whether or not it looks consumed -- cheap, and there is
+# no reliable local signal for "already read" to filter on.
+if [[ -d "$DROP_DIR" ]] && [[ -n "$(ls -A "$DROP_DIR" 2>/dev/null)" ]]; then
+  mkdir -p "$CALLER_STATE_DIR/drop-from-ingest-identity"
+  cp -r "$DROP_DIR/." "$CALLER_STATE_DIR/drop-from-ingest-identity/" 2>/dev/null || true
+  echo "preserved $(ls "$DROP_DIR" | wc -l) drop file(s) to $CALLER_STATE_DIR/drop-from-ingest-identity/"
+fi
 chown -R georjero:georjero "$CALLER_STATE_DIR" 2>/dev/null || true
 
-echo "== remove the deployed code copy and drop directory (contain no secrets) =="
+echo "== remove the deployed code copy and drop directory (contents already preserved above; contain no secrets either way) =="
 rm -rf /opt/omnissa-agent
 rm -rf "$DROP_DIR"
 

@@ -2,6 +2,10 @@
 Description=Omnissa Gmail ingestion (daily brief window) -- privileged identity only
 Wants=network-online.target
 After=network-online.target
+# See omnissa-ingest-scan.service for why this is OnSuccess=, not a
+# fixed time offset: a PARTIAL/failed ingest must never chain into a
+# success-looking brief.
+OnSuccess=omnissa-analysis-brief.service
 
 [Service]
 Type=oneshot

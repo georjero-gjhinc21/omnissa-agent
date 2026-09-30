@@ -35,11 +35,18 @@
 #   3. MOVES your EXISTING OAuth client_secret.json + token.json from
 #      ~/.config/omnissa-agent-google/ into omnissa-ingest's private
 #      storage. Nothing is regenerated; no new browser consent needed.
-#   4. Installs 4 systemd services + 4 timers (hourly scan, daily
-#      07:45/07:55 America/Chicago brief pipeline) -- georjero has no
-#      systemctl rights over any of them.
-#   5. Runs negative and positive validation tests and prints
-#      PASS/FAIL/INFO for each. Does not enable the timers itself.
+#   4. Installs 4 systemd services + 2 timers (hourly scan; daily 07:45
+#      America/Chicago brief fetch). omnissa-analysis has NO timer of
+#      its own -- its two services are activated exclusively by the
+#      matching ingest service's OnSuccess= the instant that run exits
+#      cleanly, so a partial/failed ingest never chains into a
+#      success-looking brief. Georjero has no systemctl rights over any
+#      of the 4 services.
+#   5. Runs negative and positive validation tests and prints two
+#      SEPARATE verdicts: SCHEDULED-AGENT ISOLATION (PASS/FAIL, what
+#      this script actually builds) and OPERATOR ACCOUNT RISK (a
+#      standing disclosure about georjero's own Docker access -- never
+#      merged into the isolation verdict). Does not enable timers itself.
 #
 # WHAT THIS DOES NOT DO
 #   - Does not touch Gmail, generate new credentials, or send/draft/
@@ -53,8 +60,9 @@
 #     close, is outside this project's scope, and is your call.
 #
 # ROLLBACK: infra/omnissa-ingest/rollback-root.sh. Preserves the OAuth
-# authorization (moves files back, doesn't delete) and both
-# identities' checkpoints.
+# authorization (moves files back, doesn't delete), both identities'
+# checkpoints, analysis's reports, and any drop file ingest wrote but
+# analysis hadn't yet consumed.
 
 set -euo pipefail
 
@@ -166,14 +174,18 @@ chown -R root:root "$OPT_DIR/venv"
 find "$OPT_DIR/venv" -type d -exec chmod 755 {} \;
 
 echo "== 5. install systemd units =="
+# Exactly 6 units ship in this revision -- analysis has NO independent
+# timer; it is activated only by the matching ingest service's
+# OnSuccess=. Explicitly remove any stale analysis timer files an
+# older revision of this script might have installed, so a re-run
+# never leaves a dangling independent schedule behind.
+rm -f /etc/systemd/system/omnissa-analysis-scan.timer /etc/systemd/system/omnissa-analysis-brief.timer
 install -m 644 "$REPO_SRC/infra/omnissa-ingest/omnissa-ingest-scan.service" /etc/systemd/system/
 install -m 644 "$REPO_SRC/infra/omnissa-ingest/omnissa-ingest-brief.service" /etc/systemd/system/
 install -m 644 "$REPO_SRC/infra/omnissa-ingest/omnissa-ingest-scan.timer" /etc/systemd/system/
 install -m 644 "$REPO_SRC/infra/omnissa-ingest/omnissa-ingest-brief.timer" /etc/systemd/system/
 install -m 644 "$REPO_SRC/infra/omnissa-analysis/omnissa-analysis-scan.service" /etc/systemd/system/
 install -m 644 "$REPO_SRC/infra/omnissa-analysis/omnissa-analysis-brief.service" /etc/systemd/system/
-install -m 644 "$REPO_SRC/infra/omnissa-analysis/omnissa-analysis-scan.timer" /etc/systemd/system/
-install -m 644 "$REPO_SRC/infra/omnissa-analysis/omnissa-analysis-brief.timer" /etc/systemd/system/
 systemctl daemon-reload
 
 echo "== 6. validation =="
@@ -214,20 +226,32 @@ else
   echo "FAIL: $ANA_USER may have sudo rules -- inspect manually: sudo -l -U $ANA_USER"; FAIL=1
 fi
 
-echo "-- effective privileged-path check (the part a file-permission test alone would miss) --"
-echo "INFO: $CALLER_USER (georjero) is a member of 'docker' (and 'sudo'). Docker group"
-echo "      membership is root-equivalent on its own (e.g. 'docker run -v /:/host"
-echo "      --rm -it alpine chroot /host sh'), independent of any sudo password."
-echo "      This means georjero -- and therefore any agent process running as"
-echo "      georjero -- could still reach real root and read ANY file on this"
-echo "      machine, including everything this script just locked down, THROUGH"
-echo "      DOCKER, regardless of every PASS above. This script does not and"
-echo "      cannot close that path (removing georjero from docker/sudo is a"
-echo "      separate, machine-wide decision -- see the README in this directory"
-echo "      for the trade-offs). Treat the boundary above as effective against"
-echo "      ACCIDENTAL/CASUAL cross-identity access only, not a deliberate"
-echo "      escalation by georjero itself."
-echo "STATUS: AGENT PRIVILEGE BOUNDARY = BLOCKED while georjero remains in 'docker'."
+echo
+echo "======================================================================"
+echo "TWO SEPARATE FINDINGS -- do not merge them:"
+echo "======================================================================"
+if [[ "$FAIL" -eq 0 ]]; then
+  echo "SCHEDULED-AGENT ISOLATION: PASS"
+  echo "  omnissa-ingest and omnissa-analysis cannot read each other's private"
+  echo "  storage, cannot write the deployed code, cannot control each other's"
+  echo "  units, and neither carries docker/lxd/sudo/adm membership. This is"
+  echo "  what the checks above just verified, live, on this machine."
+else
+  echo "SCHEDULED-AGENT ISOLATION: FAIL -- see the FAIL lines above. Do not enable timers."
+fi
+echo
+echo "OPERATOR ACCOUNT RISK (separate, pre-existing, not fixed by this script):"
+echo "  $CALLER_USER (georjero) is a member of 'docker' (and 'sudo'). Docker group"
+echo "  membership is root-equivalent on its own (e.g. 'docker run -v /:/host"
+echo "  --rm -it alpine chroot /host sh'), independent of any sudo password."
+echo "  This is a fact about the georjero ACCOUNT, unrelated to whether the"
+echo "  scheduled-agent isolation above passes -- omnissa-ingest and"
+echo "  omnissa-analysis have no path to georjero's privileges, and removing"
+echo "  georjero from docker is NOT required for them to be correctly isolated."
+echo "  It matters only if you also want to close georjero's OWN pre-existing"
+echo "  path to root. See the README in this directory for the trade-offs."
+echo "  Not applied here -- Docker config and georjero's groups are untouched."
+echo "======================================================================"
 
 if [[ -f "$ING_HOME/google/client_secret.json" && -f "$ING_HOME/google/token.json" ]]; then
   echo "-- positive: $ING_USER can verify account + resolve the exact label --"
@@ -251,19 +275,21 @@ fi
 echo
 if [[ "$FAIL" -eq 0 ]]; then
   cat <<EOM
-ALL FILE-PERMISSION VALIDATION CHECKS PASSED. (Docker-group risk remains -- see INFO above; not a PASS/FAIL, a standing note.)
+ALL FILE-PERMISSION VALIDATION CHECKS PASSED (SCHEDULED-AGENT ISOLATION: PASS).
 
-Enable scheduling when you're ready (not done automatically by this script):
+Only 2 timers exist -- omnissa-analysis has none of its own, it is
+activated exclusively by the matching ingest service's OnSuccess= the
+moment that run succeeds cleanly:
   systemctl enable --now omnissa-ingest-scan.timer omnissa-ingest-brief.timer
-  systemctl enable --now omnissa-analysis-scan.timer omnissa-analysis-brief.timer
 
 Check status any time:
   systemctl list-timers 'omnissa-*'
   systemctl status omnissa-ingest-scan.service omnissa-analysis-scan.service
   journalctl -u omnissa-ingest-scan.service -u omnissa-analysis-scan.service -n 20
 
-Disable if needed:
-  systemctl disable --now omnissa-ingest-scan.timer omnissa-ingest-brief.timer omnissa-analysis-scan.timer omnissa-analysis-brief.timer
+Disable if needed (stops the timers; any in-flight OnSuccess-triggered
+analysis run finishes on its own but nothing new gets scheduled):
+  systemctl disable --now omnissa-ingest-scan.timer omnissa-ingest-brief.timer
 EOM
 else
   echo "ONE OR MORE CHECKS FAILED -- do NOT enable the timers. Report this output."

@@ -18,7 +18,11 @@ Idempotent — safe to re-run after a code update or to pick up a new
 piece (e.g. this revision adds the `omnissa-analysis` identity to an
 already-deployed `omnissa-ingest`). It refuses to run from an
 uncommitted/dirty source tree and prints exactly which git commit it's
-about to deploy. Ends with PASS/FAIL/INFO validation output and does
+about to deploy. Ends with two clearly separated verdicts —
+`SCHEDULED-AGENT ISOLATION: PASS/FAIL` (what this script actually
+builds and verifies) and a standing `OPERATOR ACCOUNT RISK` disclosure
+about `georjero`'s own Docker access (a separate, pre-existing fact,
+never merged into the isolation verdict) — and does
 **not** enable the timers itself.
 
 ## What it changes
@@ -41,9 +45,14 @@ about to deploy. Ends with PASS/FAIL/INFO validation output and does
   local drafts).
 - A private, root-owned copy of this repo's `src/` at
   `/opt/omnissa-agent` — `georjero` cannot write to it.
-- 4 systemd services + 4 timers (hourly scan pipeline; daily
-  07:45/07:55 America/Chicago brief pipeline). `georjero` has no
-  systemctl rights over any of them.
+- 4 systemd services + **2 timers** (hourly scan; daily 07:45 America/
+  Chicago brief fetch). `omnissa-analysis` has no timer of its own — its
+  two services are activated exclusively by the matching ingest
+  service's `OnSuccess=` the instant that run exits cleanly, so a
+  partial/failed ingest (exit 6/PARTIAL or worse) never chains into a
+  success-looking brief, and there's no fixed-offset window where
+  analysis could read stale or in-progress data. `georjero` has no
+  systemctl rights over any of the 4 services.
 
 ## Why this boundary, not just `chmod 600`
 
@@ -81,9 +90,11 @@ for the trade-off table):
 sudo bash /home/georjero/omnissa-agent/infra/omnissa-ingest/rollback-root.sh
 ```
 
-Stops/removes all 4 timers and units, moves the OAuth credential files
-back to `~/.config/omnissa-agent-google/` (not deleted), preserves both
-identities' checkpoints and analysis's reports by copying them under
-`~/.local/state/omnissa-agent/`, removes the deployed code copy and all
+Stops/removes both timers and all 4 units, moves the OAuth credential
+files back to `~/.config/omnissa-agent-google/` (not deleted), and
+preserves — never silently deletes — everything with state: both
+identities' checkpoints, analysis's reports, and any drop file ingest
+had written but analysis hadn't yet consumed, all copied under
+`~/.local/state/omnissa-agent/`. Removes the deployed code copy and all
 4 new identities/groups. After rollback, `cli.py run` from georjero's
 own account works immediately, no new Google consent needed.

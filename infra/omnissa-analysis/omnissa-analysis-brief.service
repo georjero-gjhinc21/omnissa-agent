@@ -1,7 +1,9 @@
 [Unit]
 Description=Omnissa classification (daily brief) -- restricted identity, no Gmail/token access
 Wants=network-online.target
-After=network-online.target omnissa-ingest-brief.service
+After=network-online.target
+# NOT independently timer-triggered -- activated exclusively by
+# omnissa-ingest-brief.service's OnSuccess=. See that unit.
 
 [Service]
 Type=oneshot

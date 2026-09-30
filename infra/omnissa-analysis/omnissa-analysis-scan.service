@@ -1,7 +1,13 @@
 [Unit]
 Description=Omnissa classification (hourly bounded scan) -- restricted identity, no Gmail/token access
 Wants=network-online.target
-After=network-online.target omnissa-ingest-scan.service
+After=network-online.target
+# NOT independently timer-triggered -- this unit is activated exclusively
+# by omnissa-ingest-scan.service's OnSuccess=, immediately after a clean
+# ingest completes. No fixed time offset, no independent schedule, so
+# there is no window where this could run against a stale or
+# partially-written drop file. See that unit for the failure-chaining
+# reasoning.
 
 [Service]
 Type=oneshot
