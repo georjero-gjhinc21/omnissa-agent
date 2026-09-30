@@ -38,9 +38,36 @@ CATEGORY_KEYWORDS = {
     "Certification": ("certification", "cert", "voucher", "exam"),
     "Renewal": ("renewal", "expir",),
     "Deal Registration": ("deal registration", "opportunity registration", "preferred distributor"),
+    # Added for the partner-ops extension (2026-09-30) -- PlanetBids is a
+    # public-sector bid/solicitation portal, not a vendor program like the
+    # others; multi-word phrases here specifically to avoid a short
+    # substring like "bid" colliding with unrelated words (e.g. "forbidden").
+    "RFP": ("rfp", "request for proposal", "invitation to bid", "solicitation"),
     "Access Request": ("access", "partner connect", "portal", "partner id"),
     "Product/NFR": ("nfr", "evaluation", "test-drive", "proving ground"),
 }
+
+# Coarse buckets for the partner-ops brief (build_partner_ops_brief) --
+# deliberately separate from CATEGORY_KEYWORDS/Finding.category, which
+# stay fine-grained for everything else (single-partner brief, drafting,
+# existing tests). A category not listed here buckets to "noise" --
+# the partner-ops brief's deliberate catch-all for anything that isn't
+# one of the five actionable buckets, so it reads as low-priority
+# rather than as a normal peer category.
+PARTNER_BRIEF_BUCKETS = {
+    "Renewal": "renewal",
+    "Training": "training/cert",
+    "Certification": "training/cert",
+    "Deal Registration": "deal registration",
+    "Incentive": "incentive",
+    "Grant/Funding": "incentive",
+    "RFP": "RFP",
+}
+PARTNER_BRIEF_BUCKET_ORDER = ("renewal", "training/cert", "deal registration", "incentive", "RFP", "noise")
+
+
+def bucket_for_category(category: str) -> str:
+    return PARTNER_BRIEF_BUCKETS.get(category, "noise")
 
 
 @dataclass
@@ -53,6 +80,7 @@ class Finding:
     urgency: str = "Normal"
     due_date: str = "not stated"
     required_action: str = "Human review"
+    partner_id: str = ""  # which configured partner (config/partners.yaml) this came from
 
 
 @dataclass
@@ -86,6 +114,7 @@ def classify_message(msg: GmailMessage) -> Finding:
         source_ref=f"gmail:{msg.id}",
         due_date="not stated",
         required_action="Human confirms with Omnissa/distributor before any action",
+        partner_id=msg.partner_id,
     )
 
 
@@ -186,6 +215,103 @@ def build_brief(
                 "Summarize these Omnissa partner findings for a busy operator "
                 "in 3 bullet points, no invented facts, keep every stated "
                 f"confidence level as-is:\n{text}",
+                combo=llm_combo,
+            )
+            result.llm_backend = summary.backend
+            text += f"\n\n## LLM summary ({llm_combo}, answered by {summary.backend})\n" + summary.text
+        except DeferredError as exc:
+            result.llm_deferred = True
+            result.llm_deferred_reason = str(exc)
+            text += f"\n\n## LLM summary ({llm_combo})\ndeferred: {exc}"
+    return text
+
+
+def build_partner_ops_brief(
+    result: AgentAResult,
+    *,
+    email_status: str,
+    partner_ids: list[str],
+    partner_baselines: dict[str, Baseline | None] | None = None,
+    use_llm: bool = False,
+    llm_combo: str = router.LOCAL_ONLY_COMBO,
+    focus_category: str | None = None,
+) -> str:
+    """The partner-ops brief: one section per CONFIGURED partner (not
+    just partners with findings this run), each with its own standing
+    scoreboard (baseline.render_scoreboard, so a section still appears
+    even with zero new messages -- see docs/partners/<id>-baseline.md)
+    and its own findings grouped into coarse buckets
+    (PARTNER_BRIEF_BUCKETS) rather than fine-grained categories.
+
+    ``partner_ids``: the full configured allowlist order (e.g. from
+    config/partners.yaml) -- this is what guarantees an "omnissa"
+    section always exists even when dedup skipped every message this
+    run, not just whichever partners happened to have a finding.
+    """
+    partner_baselines = partner_baselines or {}
+    lines = [
+        "# GJH INC -- Omnissa Partner-Ops Daily Brief",
+        "",
+        f"Authorized email label status: {email_status}",
+        "",
+    ]
+    if focus_category:
+        lines.append(
+            f"Focus: {focus_category} (matching findings shown first within each "
+            "partner section this run -- nothing hidden, no classification or "
+            "urgency changed)"
+        )
+        lines.append("")
+
+    def _render_partner_section(label: str, partner_findings: list[Finding], baseline_for_partner: Baseline | None):
+        lines.append(f"## Partner: {label}")
+        lines.append(render_scoreboard(baseline_for_partner, partner_findings))
+        lines.append("")
+
+        ordered = reorder_for_focus(partner_findings, focus_category)
+        if not ordered:
+            lines.append("- no new findings this run")
+        else:
+            buckets: dict[str, list[Finding]] = {}
+            for f in ordered:
+                buckets.setdefault(bucket_for_category(f.category), []).append(f)
+            for bucket_name in PARTNER_BRIEF_BUCKET_ORDER:
+                items = buckets.get(bucket_name, [])
+                if not items:
+                    continue
+                lines.append(f"### {bucket_name}")
+                for f in items:
+                    lines.append(
+                        f"- [{f.category}] {f.summary} -- confidence={f.confidence}, "
+                        f"due={f.due_date}, action={f.required_action} (ref {f.source_ref})"
+                    )
+        lines.append("")
+
+    for pid in partner_ids:
+        _render_partner_section(pid, [f for f in result.findings if f.partner_id == pid], partner_baselines.get(pid))
+
+    # A finding whose partner_id doesn't match any CONFIGURED partner --
+    # an empty/untagged partner_id (a legacy drop file written before
+    # partner tagging existed; a caller that built a Finding directly,
+    # e.g. demo/offline data) or one naming a partner since removed from
+    # config/partners.yaml -- must never silently vanish from the human-
+    # readable brief just because it didn't fit a configured section.
+    unassigned = [f for f in result.findings if f.partner_id not in partner_ids]
+    if unassigned:
+        _render_partner_section("(unassigned)", unassigned, None)
+
+    lines.append(f"Deduplicated (already seen), all partners: {len(result.skipped_duplicate_ids)}")
+    lines.append("")
+    lines.append("## Evidence and limitations")
+    lines.append("- No external actions were taken.")
+    text = "\n".join(lines)
+
+    if use_llm and result.findings:
+        try:
+            summary: AskResult = router.ask(
+                "Summarize these partner findings for a busy operator in 3 bullet "
+                "points, no invented facts, keep every stated confidence level "
+                f"as-is:\n{text}",
                 combo=llm_combo,
             )
             result.llm_backend = summary.backend

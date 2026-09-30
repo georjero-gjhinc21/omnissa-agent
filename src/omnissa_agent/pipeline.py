@@ -49,6 +49,8 @@ def run_pilot(
     demo_findings: list[agent_a.Finding] | None = None,
     focus_category: str | None = None,
     baseline: Baseline | None = None,
+    partner_ids: list[str] | None = None,
+    partner_baselines: dict[str, Baseline | None] | None = None,
 ) -> PilotReport:
     start = time.monotonic()
     try:
@@ -69,14 +71,30 @@ def run_pilot(
             }
             state_mod.save_state(st, state_base)
 
-            brief = agent_a.build_brief(
-                result,
-                email_status=email_status,
-                use_llm=use_llm,
-                llm_combo=llm_combo,
-                focus_category=focus_category,
-                baseline=baseline,
-            )
+            # partner_ids given (the real production classify path) ->
+            # one section per configured partner, always, even with
+            # zero findings. Otherwise (scan/brief/manual, and every
+            # test predating partner-ops) -> the original flat brief,
+            # completely unchanged.
+            if partner_ids is not None:
+                brief = agent_a.build_partner_ops_brief(
+                    result,
+                    email_status=email_status,
+                    partner_ids=partner_ids,
+                    partner_baselines=partner_baselines,
+                    use_llm=use_llm,
+                    llm_combo=llm_combo,
+                    focus_category=focus_category,
+                )
+            else:
+                brief = agent_a.build_brief(
+                    result,
+                    email_status=email_status,
+                    use_llm=use_llm,
+                    llm_combo=llm_combo,
+                    focus_category=focus_category,
+                    baseline=baseline,
+                )
 
             findings_for_drafting = list(result.findings) + list(demo_findings or [])
             drafts = agent_b.draft_from_findings(findings_for_drafting)

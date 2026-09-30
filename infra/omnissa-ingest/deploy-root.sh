@@ -188,14 +188,24 @@ find "$OPT_DIR/src" -type f -exec chmod 644 {} \;
 echo "$DEPLOY_SHA" > "$OPT_DIR/DEPLOYED_SHA"
 chmod 644 "$OPT_DIR/DEPLOYED_SHA"
 
-# Only this ONE doc file ships -- classify --baseline-file reads it at
-# runtime for the always-present Scoreboard section (see baseline.py).
-# Deliberately not the whole docs/ tree: nothing else in docs/ is read
-# by any running process, so nothing else needs to leave the repo.
-mkdir -p "$OPT_DIR/docs"
-cp "$REPO_SRC/docs/omnissa-partner-baseline.md" "$OPT_DIR/docs/omnissa-partner-baseline.md"
-chown root:root "$OPT_DIR/docs/omnissa-partner-baseline.md"
-chmod 644 "$OPT_DIR/docs/omnissa-partner-baseline.md"
+# Only docs/partners/ ships -- classify --baseline-dir reads it at
+# runtime for the always-present per-partner Scoreboard section (see
+# baseline.py). Deliberately not the whole docs/ tree: nothing else in
+# docs/ is read by any running process, so nothing else needs to leave
+# the repo.
+mkdir -p "$OPT_DIR/docs/partners"
+rm -f "$OPT_DIR/docs/partners"/*-baseline.md
+cp "$REPO_SRC"/docs/partners/*-baseline.md "$OPT_DIR/docs/partners/"
+chown root:root "$OPT_DIR/docs/partners"/*-baseline.md
+chmod 644 "$OPT_DIR/docs/partners"/*-baseline.md
+
+# config/partners.yaml ships too -- ingest/classify both resolve the
+# partner label allowlist from it by default (see partners.py);
+# refusing any label not listed there is the whole point of this file.
+mkdir -p "$OPT_DIR/config"
+cp "$REPO_SRC/config/partners.yaml" "$OPT_DIR/config/partners.yaml"
+chown root:root "$OPT_DIR/config/partners.yaml"
+chmod 644 "$OPT_DIR/config/partners.yaml"
 
 [[ -x "$OPT_DIR/venv/bin/python3" ]] || python3 -m venv "$OPT_DIR/venv"
 "$OPT_DIR/venv/bin/pip" install -q -e "$OPT_DIR"

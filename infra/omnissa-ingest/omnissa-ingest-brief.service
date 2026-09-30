@@ -17,7 +17,8 @@ ExecStart=/opt/omnissa-agent/venv/bin/python3 -m omnissa_agent.cli ingest \
   --out /var/lib/omnissa-agent/drop/latest-brief.json \
   --max-messages 100 --max-pages 10 --deadline 120 \
   --state-dir /var/lib/omnissa-ingest/state \
-  --focus-out /var/lib/omnissa-agent/drop/focus.json
+  --focus-out /var/lib/omnissa-agent/drop/focus.json \
+  --partners-config /opt/omnissa-agent/config/partners.yaml
 TimeoutStartSec=150
 
 NoNewPrivileges=yes

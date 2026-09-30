@@ -1,7 +1,28 @@
+import pytest
+
 from omnissa_agent import gmail_ingest as gi
+from omnissa_agent import partners as partners_mod
 from omnissa_agent.gmail_api import GmailApiError, GmailAuthError, GmailRateLimitError
 
 GOOD_LABEL = {"id": "Label_42", "name": gi.EXPECTED_LABEL_NAME}
+
+
+@pytest.fixture(autouse=True)
+def _single_partner_allowlist(monkeypatch):
+    """This whole file predates multi-partner support (config/partners.yaml)
+    and tests single-label ingestion mechanics (pagination, dedup,
+    deadlines, malformed/stale handling) in isolation. Default every
+    test here to exactly one partner ("omnissa") so the other real
+    configured partners never silently participate as always-failing
+    resolve attempts, which would otherwise consume extra
+    time.monotonic() calls and skipped_partners entries these tests
+    were never written to expect. Multi-partner-specific behavior has
+    its own tests below/elsewhere that pass their own custom allowlist.
+    """
+    monkeypatch.setattr(
+        partners_mod, "load_partner_allowlist",
+        lambda path=None: [partners_mod.PartnerConfig(id="omnissa", label=gi.EXPECTED_LABEL_NAME)],
+    )
 
 
 class FakeClient:
@@ -91,9 +112,16 @@ def test_similarly_named_label_does_not_count_as_a_match():
 
 
 def test_ambiguous_label_when_two_exact_matches_exist():
+    """With only one partner configured (see the autouse fixture) and
+    that partner's own label ambiguous, nothing resolves at all -- the
+    overall result is LABEL_MISSING, with the real reason (ambiguity,
+    not absence) recorded per-partner in skipped_partners. A multi-
+    partner scenario where only SOME labels are ambiguous is covered
+    by test_partner_ops.py instead, where the others still resolve."""
     client = FakeClient(labels=[GOOD_LABEL, {"id": "Label_99", "name": gi.EXPECTED_LABEL_NAME}])
     result = gi.run_ingestion(client)
-    assert result.status == gi.IngestStatus.LABEL_AMBIGUOUS
+    assert result.status == gi.IngestStatus.LABEL_MISSING
+    assert "ambiguous" in result.skipped_partners["omnissa"].lower() or "2 labels" in result.skipped_partners["omnissa"]
 
 
 def test_rate_limited_during_listing(tmp_path):
@@ -270,6 +298,7 @@ def test_ingestion_result_json_roundtrip_for_drop_file(tmp_path):
 
 def test_filtered_message_never_carries_raw_gmail_payload_shape():
     raw = _raw_message("m1")
-    msg = gi._to_gmail_message(raw)
+    msg = gi._to_gmail_message(raw, partner_id="omnissa")
     # only the restricted fields exist -- no 'payload', no headers blob
-    assert set(vars(msg).keys()) == {"id", "subject", "snippet", "sender", "date", "label_ids"}
+    assert set(vars(msg).keys()) == {"id", "subject", "snippet", "sender", "date", "label_ids", "partner_id"}
+    assert msg.partner_id == "omnissa"

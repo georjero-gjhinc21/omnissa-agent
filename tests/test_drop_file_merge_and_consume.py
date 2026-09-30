@@ -87,9 +87,9 @@ def test_ingest_merges_with_an_unconsumed_prior_drop_instead_of_overwriting(tmp_
     assert rc1 == 0
     assert json.loads(out.read_text())["messages"] == [
         {"id": "m1", "subject": "Omnissa item m1", "snippet": "hi", "sender": "x@omnissa.com",
-         "date": "2026-09-29", "label_ids": ["L1"]},
+         "date": "2026-09-29", "label_ids": ["L1"], "partner_id": ""},
         {"id": "m2", "subject": "Omnissa item m2", "snippet": "hi", "sender": "x@omnissa.com",
-         "date": "2026-09-29", "label_ids": ["L1"]},
+         "date": "2026-09-29", "label_ids": ["L1"], "partner_id": ""},
     ]
 
     rc2 = cli.main(common)  # the "0 new messages" run that used to wipe the file

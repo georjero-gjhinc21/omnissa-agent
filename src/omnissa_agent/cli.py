@@ -73,6 +73,7 @@ from pathlib import Path
 
 from . import baseline as baseline_mod
 from . import focus as focus_mod
+from . import partners as partners_mod
 from . import gmail_ingest, google_oauth, research, router
 from . import lock as lock_mod
 from . import state as state_mod
@@ -426,6 +427,8 @@ def _pipeline_from_ingest_result(
     quiet_content: bool = False,
     focus_category: str | None = None,
     baseline: baseline_mod.Baseline | None = None,
+    partner_ids: list[str] | None = None,
+    partner_baselines: dict | None = None,
 ) -> int:
     """Shared back half: a verified IngestionResult -> Agent A/B -> report.
 
@@ -471,6 +474,8 @@ def _pipeline_from_ingest_result(
         llm_combo=llm_combo,
         focus_category=focus_category,
         baseline=baseline,
+        partner_ids=partner_ids,
+        partner_baselines=partner_baselines,
         max_messages=args.max_messages,
         state_base=state_base,
     )
@@ -569,6 +574,7 @@ def _run_live(args, *, kind: str) -> int:
         return REFUSED
 
     state_base = Path(args.state_dir) if args.state_dir else None
+    partners_config = getattr(args, "partners_config", None)
     gmail_client = GmailReadonlyClient(access_token)
     ingest_result = gmail_ingest.run_ingestion(
         gmail_client,
@@ -576,6 +582,7 @@ def _run_live(args, *, kind: str) -> int:
         max_messages=args.max_messages,
         deadline_s=args.deadline,
         state_base=state_base,
+        partners_config=partners_config,
     )
     # Best-effort, non-fatal (see focus.resolve_focus_instruction): this
     # single-process path already holds the same read-only Gmail client
@@ -583,9 +590,11 @@ def _run_live(args, *, kind: str) -> int:
     # instruction directly -- no new flag needed here.
     instruction = focus_mod.resolve_focus_instruction(gmail_client)
     focus_category = instruction.category if instruction else None
-    baseline = baseline_mod.load_baseline(getattr(args, "baseline_file", None))
+    partner_ids = [p.id for p in partners_mod.load_partner_allowlist(partners_config)]
+    partner_baselines = baseline_mod.load_partner_baselines(getattr(args, "baseline_dir", None), partner_ids)
     return _pipeline_from_ingest_result(
-        ingest_result, kind=kind, args=args, focus_category=focus_category, baseline=baseline
+        ingest_result, kind=kind, args=args, focus_category=focus_category,
+        partner_ids=partner_ids, partner_baselines=partner_baselines,
     )
 
 
@@ -640,6 +649,7 @@ def _ingest_locked(args, client_config, access_token, state_base) -> int:
         max_messages=args.max_messages,
         deadline_s=args.deadline,
         state_base=state_base,
+        partners_config=getattr(args, "partners_config", None),
     )
 
     # Optional, best-effort focus handoff to classify -- see focus.py.
@@ -743,10 +753,15 @@ def _classify(args) -> int:
         if instruction is not None:
             focus_category = instruction.category
 
-    # Baseline scoreboard (see baseline.py + docs/omnissa-partner-baseline.md).
-    # Optional -- omitting --baseline-file renders an honest "not
-    # available" scoreboard, never a crash, never a guess.
-    baseline = baseline_mod.load_baseline(getattr(args, "baseline_file", None))
+    # Partner-ops brief (see agent_a.build_partner_ops_brief, baseline.py,
+    # docs/partners/<id>-baseline.md). ALWAYS computed -- classify is the
+    # real scheduled production path, and "one section per partner, even
+    # with zero findings" is the point, not an opt-in. --partners-config
+    # defaults to the real config/partners.yaml; --baseline-dir defaults
+    # to None, rendering an honest "not available" scoreboard per
+    # partner rather than a crash or an invented status.
+    partner_ids = [p.id for p in partners_mod.load_partner_allowlist(getattr(args, "partners_config", None))]
+    partner_baselines = baseline_mod.load_partner_baselines(getattr(args, "baseline_dir", None), partner_ids)
 
     # scan and brief classify share the SAME --state-dir (and therefore
     # the same checkpoint.json) on the analysis identity. This is
@@ -761,7 +776,7 @@ def _classify(args) -> int:
     # locking to `ingest`, which had no equivalent existing protection.
     rc = _pipeline_from_ingest_result(
         ingest_result, kind=args.kind, args=args, quiet_content=True,
-        focus_category=focus_category, baseline=baseline,
+        focus_category=focus_category, partner_ids=partner_ids, partner_baselines=partner_baselines,
     )
 
     # Delete the drop file ONLY once every message it held has actually
@@ -896,9 +911,17 @@ def main(argv: list[str] | None = None) -> int:
     run_p.add_argument("--deadline", type=float, default=90.0, help="total ingestion wall-clock budget, seconds")
     run_p.add_argument("--state-dir", default=None)
     run_p.add_argument(
-        "--baseline-file",
+        "--partners-config",
         default=None,
-        help="path to docs/omnissa-partner-baseline.md -- see classify --baseline-file",
+        help="path to config/partners.yaml (default: the real repo config). See "
+        "partners.py -- refuses to fetch any label not listed there.",
+    )
+    run_p.add_argument(
+        "--baseline-dir",
+        default=None,
+        help="directory of <partner-id>-baseline.md files (see baseline.py, "
+        "docs/partners/). Optional -- a missing per-partner file renders an "
+        "honest 'not available' scoreboard for that partner, never a crash.",
     )
     run_p.add_argument(
         "--llm-policy",
@@ -920,6 +943,13 @@ def main(argv: list[str] | None = None) -> int:
     ingest_p.add_argument("--max-pages", type=int, default=5)
     ingest_p.add_argument("--deadline", type=float, default=90.0)
     ingest_p.add_argument("--state-dir", default=None)
+    ingest_p.add_argument(
+        "--partners-config",
+        default=None,
+        help="path to config/partners.yaml (default: the real repo config, or a "
+        "single-entry omnissa-only allowlist if that file doesn't exist). See "
+        "partners.py -- refuses to fetch any label not listed there, ever.",
+    )
     ingest_p.add_argument(
         "--focus-out",
         default=None,
@@ -964,11 +994,19 @@ def main(argv: list[str] | None = None) -> int:
         "same as omitting the flag, never an error.",
     )
     classify_p.add_argument(
-        "--baseline-file",
+        "--partners-config",
         default=None,
-        help="path to docs/omnissa-partner-baseline.md (see baseline.py) -- rendered as an "
-        "always-present Scoreboard section, even when zero messages were fetched this run. "
-        "Optional -- omitting it renders an honest 'not available' scoreboard, never a crash.",
+        help="path to config/partners.yaml (default: the real repo config). Drives "
+        "which partner sections the brief always shows, findings or not.",
+    )
+    classify_p.add_argument(
+        "--baseline-dir",
+        default=None,
+        help="directory of <partner-id>-baseline.md files (see baseline.py, "
+        "docs/partners/) -- rendered as an always-present per-partner Scoreboard "
+        "section, even when zero messages were fetched this run. Optional -- a "
+        "missing per-partner file renders an honest 'not available' scoreboard "
+        "for that partner, never a crash.",
     )
     classify_p.add_argument(
         "--llm-policy", choices=["local-only", "combo-continuous"], default="local-only"

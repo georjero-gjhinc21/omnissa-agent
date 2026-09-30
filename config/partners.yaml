@@ -1,0 +1,28 @@
+# GJH INC partner Gmail-label allowlist.
+#
+# EXACT label match only, case-sensitive, no substrings, no renames.
+# gmail_ingest.py refuses to fetch any label not listed here -- there
+# is no code path that can request an arbitrary label, and no
+# in:anywhere/in:all query is ever used anywhere in this project.
+#
+# Parsed by partners.py's own small parser (not a general YAML lib --
+# see that module's docstring for why). Keep this exact shape: a
+# top-level `partners:` key, then `- id: <slug>` / `label: "<exact
+# Gmail label name>"` pairs, one per partner.
+partners:
+  - id: omnissa
+    label: "Archive_/@omnissa.com"
+  - id: microsoft
+    label: "Archive_/@microsoft.com"
+  - id: google
+    label: "Archive_/@google.com"
+  - id: nvidia
+    label: "Archive_/@nvidia.com"
+  - id: planetbids
+    label: "Archive_/@planetbids.com"
+
+# UNVERIFIED -- do not uncomment until `cli.py list-labels` (run against
+# the real mailbox) confirms this EXACT name exists. Not confirmed as of
+# 2026-09-30 -- this session has no live Gmail credential to check it.
+#  - id: barracuda
+#    label: "Archive_/@barracuda.com"

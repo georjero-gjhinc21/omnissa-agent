@@ -17,7 +17,8 @@ ExecStart=/opt/omnissa-agent/venv/bin/python3 -m omnissa_agent.cli classify \
   --reports-dir /var/lib/omnissa-agent/reports \
   --report-group-readable \
   --focus-in /var/lib/omnissa-agent/drop/focus.json \
-  --baseline-file /opt/omnissa-agent/docs/omnissa-partner-baseline.md
+  --partners-config /opt/omnissa-agent/config/partners.yaml \
+  --baseline-dir /opt/omnissa-agent/docs/partners
 TimeoutStartSec=180
 
 NoNewPrivileges=yes

@@ -23,6 +23,12 @@ class GmailMessage:
     sender: str
     date: str
     label_ids: tuple[str, ...]
+    # Which configured partner (config/partners.yaml) this message was
+    # fetched under -- "" for anything constructed before partner-ops
+    # tagging existed (offline/synthetic tests, old drop files read
+    # back after an upgrade). Never inferred from content; set once, at
+    # fetch time, by gmail_ingest.run_ingestion.
+    partner_id: str = ""
 
 
 class LiveGmailUnavailable(RuntimeError):

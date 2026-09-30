@@ -35,6 +35,19 @@ class Baseline:
         return self.fields.get(key, default)
 
 
+def load_partner_baselines(baseline_dir: Path | str | None, partner_ids: list[str]) -> dict[str, "Baseline | None"]:
+    """Loads ``<baseline_dir>/<id>-baseline.md`` for each id in
+    `partner_ids` (e.g. from config/partners.yaml). A missing file for
+    a given partner maps to None -- callers render an honest "not
+    available" scoreboard for that partner, never a crash and never an
+    invented status. `baseline_dir=None` maps every partner to None.
+    """
+    if baseline_dir is None:
+        return {pid: None for pid in partner_ids}
+    base = Path(baseline_dir)
+    return {pid: load_baseline(base / f"{pid}-baseline.md") for pid in partner_ids}
+
+
 def load_baseline(path: Path | None) -> Baseline | None:
     """Returns None on anything short of a fully-readable, well-formed
     block -- callers must render a graceful "not available" scoreboard
