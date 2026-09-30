@@ -697,3 +697,57 @@ the OS-user isolation proposal in `docs/gmail-ingestion-security-review.md`
 (token isolation from Claude/Orca agent processes) -- resolve before any
 unattended scheduling. Agent-B still owes
 `docs/omnissa-partner-baseline.md`.
+
+---
+
+**2026-09-30 (cutover session) — two more real bugs found live during the
+first actual guarded production cutover attempt, both fixed, both
+covered by new regression tests, all 158 tests green:**
+
+1. **Checkpoint ownership corruption.** `requeue
+   --verify-unclassified-against` runs as root; `state.save_state`'s
+   atomic tmp+replace didn't preserve the original file's owner, so a
+   root-run save left the ingest checkpoint root-owned -- the
+   `omnissa-ingest` systemd service then couldn't read its own
+   checkpoint (`PermissionError`, confirmed from the operator's live
+   terminal). Fixed: `save_state` now captures and restores the
+   original owner on a root-run rewrite of an existing file. See
+   `tests/test_state_and_lock.py`'s 4 new `test_save_state_*` tests.
+   Committed/pushed as `d8e0d4a`.
+
+2. **`classify`'s own `--max-messages` truncated a merged drop before
+   checking what was already classified, and deleted the file anyway.**
+   First real scan chain: `merge_pending` combined a leftover 33-message
+   unconsumed drop with a fresh 50-message fetch into an 83-message
+   drop; classify's default cap (50) silently truncated to the first 50
+   before Agent A ever compared against `seen_ids` -- 33 real messages
+   were never looked at, and the drop file got deleted anyway
+   (`ingest_result.status == OK` was the only gate). The
+   `messages_seen=83` log line was itself misleading (raw drop size, not
+   what was processed) -- that's what cost the most time diagnosing it.
+   Caught only because the cutover script's own `reconcile` gate
+   (fetched vs. classified count) refused to proceed after the chain
+   reported success. Nothing lost from Gmail -- the 33 ids were already
+   safely in `gmail_ingested_ids`, recoverable via `requeue` -- but the
+   drop file itself was already gone by the time this was diagnosed.
+   Fixed: `_pipeline_from_ingest_result` now compares
+   `report.messages_seen` against the drop's raw size and treats a
+   mismatch as PARTIAL (honest logging: `drop_size=`/
+   `messages_processed=`/`message_list_truncated=`); `_classify`'s
+   delete-on-consume independently re-checks the same truncation
+   condition and refuses to delete when true, regardless of `rc`;
+   classify's own `--max-messages` default raised 50 -> 500 so a
+   routinely-merged backlog doesn't hit this in normal operation. Full
+   incident writeup in `docs/operations-record.md` §0 (includes a noted,
+   deliberately-not-yet-fixed residual limitation: truncation always
+   keeps the list's head, so a backlog bigger than 500 would need
+   dedupe-before-truncate ordering in `pipeline.run_pilot`, not just a
+   bigger cap -- not urgent at current mailbox volume).
+
+Next action at the point this was written: the live corrupted ingest
+checkpoint has been self-healed by the cutover script's own new first
+step, but the 33-message backlog from incident #2 above is still
+pending (real ids, safely recoverable, not yet requeued) since the fix
+needs to be deployed first. Timers are still NOT enabled. The guarded
+cutover sequence needs to be re-run in full from the top once this
+commit is pushed and deployed.

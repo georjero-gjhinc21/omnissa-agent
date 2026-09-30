@@ -80,6 +80,77 @@ inspection before enabling anything:**
    returns a distinct `LOCKED` (exit 7) that `classify` checks before
    ever unlinking its input.
 
+**2026-09-30 — a root-run checkpoint rewrite silently changed the
+checkpoint's file ownership.** `requeue --verify-unclassified-against`
+must run as root (it needs to read a second identity's private
+checkpoint to cross-check against). `state.save_state`'s atomic
+tmp-file-then-replace rewrite didn't preserve the original file's
+owner, so a root-run save left `/var/lib/omnissa-ingest/state/
+checkpoint.json` root-owned — the `omnissa-ingest` systemd service then
+got `PermissionError: [Errno 13] Permission denied` trying to read its
+own checkpoint on the very next scheduled run. Confirmed live from the
+operator's own terminal output. Fixed in `state.save_state`: capture
+the existing file's owner before replacing it, and `chown` the
+replacement back to that owner whenever the process is running as root
+and the file already existed (first-ever writes and non-root saves are
+untouched — see `tests/test_state_and_lock.py`'s four
+`test_save_state_*` regression tests). The cutover script's own first
+step now also self-heals any already-corrupted checkpoint from before
+this fix landed, since remediating the live file and deploying the fix
+are two separate steps.
+
+**2026-09-30 — classify's own `--max-messages` truncated a merged drop
+before checking what was already classified, and the file was deleted
+anyway.** During the first real post-cutover scan chain, `merge_pending`
+correctly combined a leftover unconsumed drop (33 messages, from
+earlier in this same day's incidents) with a fresh fetch (50 new
+messages) into an 83-message drop file. `classify`'s own
+`--max-messages` (defaulting to 50, same as ingest's separate per-run
+fetch cap — coincidentally similar numbers, unrelated caps) truncated
+`run_pilot`'s view of that list to the first 50 *before* Agent A ever
+compared it against `seen_ids`. The remaining 33 messages — genuinely
+real, never-before-classified — were never looked at, yet
+`ingest_result.status == OK` was enough for `classify` to delete the
+drop file, per the existing (insufficient) `rc != LOCKED` guard. The log
+line reporting `messages_seen=83` also actively hid this: it printed
+the drop's raw size, not what was actually processed, which is what
+made this look like a clean, complete run. Caught only because the
+cutover script's own `reconcile` gate (fetched vs. classified) refused
+to proceed with a nonzero pending count after the chain "succeeded."
+Nothing was lost from Gmail (read-only; the 33 ids were still safely
+recorded in `gmail_ingested_ids`, exactly what `reconcile`/`requeue`
+exist to recover), but the drop file that would have let a normal
+retry happen automatically was already gone.
+
+Fixed in `cli.py`: (1) `_pipeline_from_ingest_result` now compares
+`report.messages_seen` (what was actually processed) against
+`len(ingest_result.messages)` (the drop's raw size) and treats a
+mismatch as PARTIAL exactly like a deadline hit, with an honest log
+line (`drop_size=`/`messages_processed=`/`message_list_truncated=`
+instead of the misleading `messages_seen=<raw size>`); (2) `_classify`'s
+delete-on-consume now independently re-checks
+`len(ingest_result.messages) > args.max_messages` and refuses to delete
+when true, regardless of `rc` — a pure deadline-hit PARTIAL with no
+truncation still deletes safely, since in that case everything the
+drop *did* contain was fully processed. (3) `classify`'s own
+`--max-messages` default raised from 50 to 500 so a routinely-merged
+backlog doesn't hit this path in normal operation — the truncation
+guard is now a safety net, not something steady-state runs should ever
+exercise. See `tests/test_drop_file_merge_and_consume.py`'s
+`test_classify_does_not_delete_the_drop_file_when_max_messages_truncates_it`
+and the two adjacent tests distinguishing the truncation case from a
+safe, fully-processed deadline-hit PARTIAL.
+
+Known residual limitation, not yet fixed (tracked, not urgent given the
+raised cap): truncation always keeps the *first* N messages of the
+list and, since the file is no longer deleted, a still-oversized backlog
+would keep reprocessing the same already-seen head of the list on every
+run rather than making progress toward the untouched tail. This would
+only bite under a backlog larger than 500 merged messages, which normal
+hourly operation should never reach; if it ever does, fixing it means
+having `run_pilot` dedupe against `seen_ids` before truncating, not
+after, rather than raising the cap further.
+
 ## 1. Architecture — who runs what
 
 | Stage | Process / identity | Code | Network it can reach |

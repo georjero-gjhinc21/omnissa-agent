@@ -123,6 +123,72 @@ def test_classify_does_not_delete_the_drop_file_on_refusal(tmp_path):
     assert drop.exists(), "a refused/unconsumed drop must be preserved for inspection and retry"
 
 
+def test_classify_does_not_delete_the_drop_file_when_max_messages_truncates_it(tmp_path):
+    """Regression for a real, confirmed-live near-miss (2026-09-29): a
+    merged drop held 83 messages (33 old unconsumed + 50 freshly fetched
+    after merge_pending); classify's own --max-messages (then defaulting
+    to 50) truncated the list BEFORE Agent A ever saw the remaining 33 --
+    genuinely real, never-classified messages -- and the drop file was
+    deleted anyway because ingest_result.status was OK and rc wasn't
+    LOCKED. Nothing distinguished "fully consumed" from "silently
+    truncated." The 33 ids were recoverable via gmail_ingested_ids +
+    reconcile/requeue this time, but only because this exact scenario was
+    caught by a reconcile check the cutover script happened to run --
+    the drop file itself must never be deleted when it wasn't fully
+    processed, regardless of the exit code that resulted.
+    """
+    drop = tmp_path / "drop.json"
+    messages = [_msg(f"m{i}") for i in range(5)]
+    result = IngestionResult(status=IngestStatus.OK, account="a", label_id="L", label_name="L",
+                              messages=messages)
+    drop.write_text(json.dumps(result.to_json_dict()))
+
+    rc = cli.main([
+        "classify", "--kind", "scan", "--ingest-result", str(drop),
+        "--state-dir", str(tmp_path), "--max-messages", "3",
+    ])
+    assert rc == cli.PARTIAL
+    assert drop.exists(), "a drop file truncated by --max-messages must never be deleted"
+
+    state = json.loads((tmp_path / "checkpoint.json").read_text())
+    assert set(state["seen_ids"]) == {"m0", "m1", "m2"}, (
+        "only the first --max-messages ids should have been marked seen this run"
+    )
+
+
+def test_classify_reports_partial_and_leaves_file_even_without_deadline_hit(tmp_path):
+    """The truncation case has nothing to do with ingest's own deadline --
+    deadline_hit can be False and this must still be caught."""
+    drop = tmp_path / "drop.json"
+    result = IngestionResult(status=IngestStatus.OK, account="a", label_id="L", label_name="L",
+                              messages=[_msg("m1"), _msg("m2")], deadline_hit=False)
+    drop.write_text(json.dumps(result.to_json_dict()))
+
+    rc = cli.main([
+        "classify", "--kind", "scan", "--ingest-result", str(drop),
+        "--state-dir", str(tmp_path), "--max-messages", "1",
+    ])
+    assert rc == cli.PARTIAL
+    assert drop.exists()
+
+
+def test_classify_still_deletes_on_a_pure_deadline_hit_with_no_truncation(tmp_path):
+    """A deadline_hit PARTIAL where every message in the drop WAS fully
+    processed (no --max-messages truncation) has nothing left unconsumed
+    in the file -- safe to delete, unlike the truncation case above."""
+    drop = tmp_path / "drop.json"
+    result = IngestionResult(status=IngestStatus.OK, account="a", label_id="L", label_name="L",
+                              messages=[_msg("m1")], deadline_hit=True)
+    drop.write_text(json.dumps(result.to_json_dict()))
+
+    rc = cli.main([
+        "classify", "--kind", "scan", "--ingest-result", str(drop),
+        "--state-dir", str(tmp_path), "--max-messages", "50",
+    ])
+    assert rc == cli.PARTIAL
+    assert not drop.exists(), "fully-processed content has nothing left to preserve"
+
+
 def test_full_incident_replay_ingest_ingest_then_classify_loses_nothing(tmp_path, monkeypatch):
     """End-to-end replay of the exact real sequence: ingest (50 msgs) ->
     ingest (0 new, would have wiped the file before the fix) -> classify.

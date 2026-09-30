@@ -445,25 +445,50 @@ def _pipeline_from_ingest_result(ingest_result, *, kind: str, args) -> int:
               "skipping this cycle cleanly; input left untouched for the next run.",
               file=sys.stderr)
         return LOCKED
+    # The drop file can legitimately hold MORE messages than one run
+    # processes -- either ingest's own deadline was hit, or (confirmed
+    # live, 2026-09-29, a real near-miss) run_pilot's own --max-messages
+    # cap truncates `ingest_result.messages` BEFORE Agent A ever sees the
+    # rest: a merged drop of 83 messages (33 old + 50 new after
+    # merge_pending) with the default cap of 50 silently classified only
+    # the first 50 -- 33 real, never-before-classified messages were
+    # never looked at, yet nothing here distinguished that from a clean
+    # success. `report.messages_seen` reflects what run_pilot actually
+    # processed after its own cap; `len(ingest_result.messages)` is the
+    # drop's raw, untruncated size -- if they differ, real data was left
+    # unprocessed this run.
+    message_list_truncated = len(ingest_result.messages) > report.messages_seen
+    partial = ingest_result.deadline_hit or message_list_truncated
+
     file_mode = 0o640 if getattr(args, "report_group_readable", False) else 0o600
     reports_dir = getattr(args, "reports_dir", None)
     path = _write_report(kind, report, state_base=state_base, file_mode=file_mode, reports_dir=reports_dir)
     print(f"wrote {path}")
     print(
         f"account={ingest_result.account} label={ingest_result.label_name} "
-        f"messages_seen={len(ingest_result.messages)} "
+        f"drop_size={len(ingest_result.messages)} "
+        f"messages_processed={report.messages_seen} "
         f"duplicates_skipped={ingest_result.duplicates_skipped} "
         f"rejected_stale_label={len(ingest_result.rejected_stale_label_ids)} "
         f"malformed={len(ingest_result.malformed_ids)} "
-        f"deadline_hit={ingest_result.deadline_hit}"
+        f"deadline_hit={ingest_result.deadline_hit} "
+        f"message_list_truncated={message_list_truncated}"
     )
     print(report.brief_markdown)
     if report.llm_backend:
         print(f"LLM backend used: {report.llm_backend}", file=sys.stderr)
 
-    if ingest_result.deadline_hit:
+    if partial:
+        reasons = []
+        if ingest_result.deadline_hit:
+            reasons.append("ingestion deadline reached")
+        if message_list_truncated:
+            reasons.append(
+                f"drop held {len(ingest_result.messages)} messages but only "
+                f"{report.messages_seen} were processed this run (--max-messages cap)"
+            )
         print(
-            "PARTIAL: ingestion deadline reached -- not all available messages were "
+            "PARTIAL: " + "; ".join(reasons) + " -- not all available messages were "
             "processed this run. Unprocessed messages are NOT marked seen and will "
             "be picked up on the next run, not silently dropped.",
             file=sys.stderr,
@@ -638,19 +663,33 @@ def _classify(args) -> int:
     # locking to `ingest`, which had no equivalent existing protection.
     rc = _pipeline_from_ingest_result(ingest_result, kind=args.kind, args=args)
 
-    # Delete the drop file ONLY once its data has actually been
-    # classified (status OK -- a report was written, whether or not the
-    # LLM step was deferred or the ingest side was partial). This is
-    # what tells the NEXT `ingest` run there is nothing pending to merge
-    # with. On a refusal (bad account/label recorded in the file, or
-    # unreadable input), OR a lock-skip (rc == LOCKED -- nothing was
-    # actually processed this run), the file is left in place for
-    # inspection/retry -- never silently discarded.
-    if ingest_result.status == gmail_ingest.IngestStatus.OK and rc != LOCKED:
+    # Delete the drop file ONLY once every message it held has actually
+    # been classified. Checked independently of `rc` here (not just
+    # rc != LOCKED) -- confirmed live (2026-09-29) as a real near-miss:
+    # `_pipeline_from_ingest_result`'s own --max-messages cap can
+    # truncate the message list it actually processes to fewer than
+    # `len(ingest_result.messages)`, and that used to delete the file
+    # anyway since status was OK and rc wasn't LOCKED. A deadline_hit-only
+    # PARTIAL (no truncation) still deletes safely -- everything ingest
+    # DID fetch was fully processed, only Gmail itself has more unfetched
+    # mail, which is a separate, already-tracked situation.
+    message_list_truncated = len(ingest_result.messages) > args.max_messages
+    if (
+        ingest_result.status == gmail_ingest.IngestStatus.OK
+        and rc != LOCKED
+        and not message_list_truncated
+    ):
         try:
             in_path.unlink()
         except OSError as exc:
             print(f"WARNING: classified successfully but could not remove {in_path}: {exc}", file=sys.stderr)
+    elif message_list_truncated:
+        print(
+            f"NOTE: drop file left in place -- it held {len(ingest_result.messages)} "
+            f"messages, more than --max-messages {args.max_messages}, so not everything "
+            "in it was processed this run.",
+            file=sys.stderr,
+        )
 
     return rc
 
@@ -790,7 +829,18 @@ def main(argv: list[str] | None = None) -> int:
         default=None,
         help="refuse if the drop file is older than this many seconds (missed-run detection)",
     )
-    classify_p.add_argument("--max-messages", type=int, default=50)
+    classify_p.add_argument(
+        "--max-messages",
+        type=int,
+        default=500,
+        help="cap on how many of the drop file's messages this run processes. Kept well "
+        "above ingest's own per-run fetch cap (50) because merge_pending can combine a "
+        "prior unconsumed drop with a fresh fetch -- a cap too close to ingest's own would "
+        "routinely truncate a merged backlog (confirmed live, 2026-09-29: a merged drop of "
+        "83 messages against the old default of 50). Truncation past this cap is now safe "
+        "either way -- the drop file is left in place, not deleted -- but a generous cap "
+        "means that's a rare fallback, not the normal path.",
+    )
     classify_p.add_argument("--state-dir", default=None)
     classify_p.add_argument(
         "--llm-policy", choices=["local-only", "combo-continuous"], default="local-only"
