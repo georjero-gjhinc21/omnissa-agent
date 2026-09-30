@@ -17,6 +17,7 @@ from pathlib import Path
 from . import agent_a, agent_b, router
 from . import state as state_mod
 from .agent_a import AgentAResult
+from .baseline import Baseline
 from .agent_b import DraftEmail
 from .lock import AlreadyRunningError, SingleInstanceLock
 from .sources import GmailMessage
@@ -47,6 +48,7 @@ def run_pilot(
     state_base: Path | None = None,
     demo_findings: list[agent_a.Finding] | None = None,
     focus_category: str | None = None,
+    baseline: Baseline | None = None,
 ) -> PilotReport:
     start = time.monotonic()
     try:
@@ -73,6 +75,7 @@ def run_pilot(
                 use_llm=use_llm,
                 llm_combo=llm_combo,
                 focus_category=focus_category,
+                baseline=baseline,
             )
 
             findings_for_drafting = list(result.findings) + list(demo_findings or [])

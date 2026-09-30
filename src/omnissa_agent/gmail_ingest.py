@@ -232,6 +232,20 @@ def run_ingestion(
     except IngestionRefused as exc:
         return IngestionResult(status=exc.status, reason=exc.reason)
 
+    # Second, redundant guard layer -- gmail_scope.py's own check, kept
+    # deliberately in sync with EXPECTED_ACCOUNT/EXPECTED_LABEL_NAME
+    # above (it imports them, not its own copies -- see gmail_scope.py's
+    # module docstring for the real staleness incident this replaces).
+    # Deferred import: gmail_scope imports FROM this module at its own
+    # top level, so importing it at THIS module's top level would be a
+    # circular import -- safe here since gmail_ingest is already fully
+    # loaded in sys.modules by the time run_ingestion is ever called.
+    from . import gmail_scope
+    try:
+        gmail_scope.check_fetch_args(account=account, label_ids=[label_name], readonly=True)
+    except gmail_scope.ScopeError as exc:
+        return IngestionResult(status=IngestStatus.UNEXPECTED_ERROR, account=account, reason=f"scope guard: {exc}")
+
     st = state_mod.load_state(state_base)
     all_ids: list[str] = []
     page_token = None

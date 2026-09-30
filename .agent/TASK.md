@@ -1,20 +1,39 @@
 # TASK (single worktree, two agents)
 
-## Milestone 1 — scoped skeleton + partner baseline (no live Gmail yet)
+## Milestone 1 — scoped skeleton + partner baseline (superseded, kept for history)
 
 - A1 (Agent-A): `src/omnissa_agent/gmail_scope.py` + `tests/test_scope_guard.py`
-  green. No real Gmail calls until user approves OAuth readonly.
-- B1 (Agent-B): `docs/omnissa-partner-baseline.md` — program tiers, grants
-  entry points, open questions, all with links/dates.
+  green. **Done, and since realigned (2026-09-30)** to the real
+  production account/label (`george@gjh-inc.com` /
+  `Archive_/@omnissa.com`), not the day-one placeholder
+  (`consult@gjh-inc.com` / label `Omnissa`) originally listed below.
+- B1 (Agent-B): `docs/omnissa-partner-baseline.md` — **done**, filled
+  with sourced partner-status facts (Partner ID, renewal, OSP/OTSP
+  enablement gap, preferred-distributor gap), each cited to a Gmail
+  thread + date. Read at runtime by `classify --baseline-file` for the
+  brief's always-present Scoreboard section.
 - B2 (Agent-B): review A1, blockers-only note in `docs/`.
 
-## Blocked on user approval (do NOT proceed without it)
+## Current state (2026-09-30) — NOT blocked, already live
 
-1. Google OAuth for `consult@gjh-inc.com`, scope `gmail.readonly`, token
-   mode 600 on Spark. Confirm exact label name `Omnissa` exists.
-2. `gmail.send` — separate approval, later milestone only.
-3. Any 24x7 polling (Orca automation / systemd) — off until 1 is granted.
-4. Course / partner-portal credential submission — never without explicit go.
+Gmail OAuth (readonly), the real label, and 24x7 scheduling are **all
+already approved and running** — this is no longer "day one." Two
+systemd timers (`omnissa-ingest-scan.timer` hourly,
+`omnissa-ingest-brief.timer` daily 07:45 Central) drive a
+privilege-separated ingest+classify pipeline; see
+`docs/operations-record.md` for the architecture and incident history,
+and `infra/24x7/README.md` for what's viewable read-only and how.
+
+What's still genuinely gated, unchanged from the original list below:
+
+1. `gmail.send` / `gmail.compose` — not granted, not requested. See
+   `docs/autonomous-vision-and-open-decisions.md`.
+2. Course / partner-portal credential submission, any real-world action
+   on Omnissa's systems (portal submit, deal registration, enrollment,
+   purchase) — never without explicit operator execution. No code path
+   in this repo can do any of these.
+3. Orca or any coding-agent automation reading/acting on Gmail — never;
+   Orca stays a read-only viewer of already-written report files.
 
 ## Done when
 

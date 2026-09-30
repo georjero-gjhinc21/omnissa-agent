@@ -188,6 +188,15 @@ find "$OPT_DIR/src" -type f -exec chmod 644 {} \;
 echo "$DEPLOY_SHA" > "$OPT_DIR/DEPLOYED_SHA"
 chmod 644 "$OPT_DIR/DEPLOYED_SHA"
 
+# Only this ONE doc file ships -- classify --baseline-file reads it at
+# runtime for the always-present Scoreboard section (see baseline.py).
+# Deliberately not the whole docs/ tree: nothing else in docs/ is read
+# by any running process, so nothing else needs to leave the repo.
+mkdir -p "$OPT_DIR/docs"
+cp "$REPO_SRC/docs/omnissa-partner-baseline.md" "$OPT_DIR/docs/omnissa-partner-baseline.md"
+chown root:root "$OPT_DIR/docs/omnissa-partner-baseline.md"
+chmod 644 "$OPT_DIR/docs/omnissa-partner-baseline.md"
+
 [[ -x "$OPT_DIR/venv/bin/python3" ]] || python3 -m venv "$OPT_DIR/venv"
 "$OPT_DIR/venv/bin/pip" install -q -e "$OPT_DIR"
 chown -R root:root "$OPT_DIR/venv"

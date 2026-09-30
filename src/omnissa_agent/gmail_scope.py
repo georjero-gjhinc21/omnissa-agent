@@ -1,18 +1,29 @@
-"""Gmail scope guard: every fetch MUST stay inside label ``Omnissa``.
+"""Gmail scope guard: read-only, exactly one label.
 
-Day-one policy (see AGENTS.md / worksplit.md):
-- read-only: no send, no label mutation
-- mailbox: consult@gjh-inc.com, label ``Omnissa`` only
-- helpers reject any call that omits/scopes beyond the label
+Originally written against a DAY-ONE placeholder mailbox before real
+production ingest existed (``consult@gjh-inc.com``, label ``"Omnissa"``
+-- a label that was never real). Confirmed stale (2026-09-30): this
+guard was never actually wired into the real ingest path at all --
+``gmail_ingest.py`` enforces the same two constraints independently,
+via its own ``verify_account``/``resolve_label``, against the real
+production values (``george@gjh-inc.com``, exact label
+``Archive_/@omnissa.com``).
 
-Real Gmail API wiring lands after the user approves OAuth (readonly).
-Until then these helpers define the interface + enforce the guard so
-tests stay green and reviewers have something to check.
+The single source of truth for both constants is now
+``gmail_ingest.py`` -- this module imports them rather than duplicating
+its own copies, so the two can never drift apart again the way they
+already had. ``gmail_ingest.run_ingestion`` calls ``check_fetch_args``
+as a second, redundant guard layer right after resolving the real
+account/label -- defense in depth, never a replacement for its own
+checks, and it can never actually fire in normal operation since both
+sides now read from the same constants.
 """
 
-ALLOWED_LABEL_ID = "Omnissa"
-ALLOWED_ACCOUNT = "consult@gjh-inc.com"
-READONLY = True  # day one: never send
+from .gmail_ingest import EXPECTED_ACCOUNT, EXPECTED_LABEL_NAME
+
+ALLOWED_LABEL_ID = EXPECTED_LABEL_NAME
+ALLOWED_ACCOUNT = EXPECTED_ACCOUNT
+READONLY = True  # unconditional -- there is no write path anywhere in this codebase
 
 
 class ScopeError(ValueError):
@@ -20,11 +31,20 @@ class ScopeError(ValueError):
 
 
 def build_query(user_query=""):
-    """Return the Gmail search query constrained to the Omnissa label."""
+    """Return the Gmail search query constrained to the allowed label.
+
+    NOT what the real production path actually uses -- gmail_ingest.py
+    never builds a free-text query string at all; it lists messages by
+    the resolved label ID directly via the API's own ``labelIds``
+    parameter (see gmail_ingest.py's module docstring: "no free-text
+    query, no in:anywhere"). This function is kept for any future/
+    alternate fetch path that might want a query string, with the same
+    widening guard either way.
+    """
     user_query = (user_query or "").strip()
     if "in:all" in user_query or "in:anywhere" in user_query:
-        raise ScopeError("query must not widen beyond label:Omnissa")
-    base = "label:Omnissa"
+        raise ScopeError(f"query must not widen beyond label:{ALLOWED_LABEL_ID}")
+    base = f"label:{ALLOWED_LABEL_ID}"
     return f"{base} {user_query}".strip() if user_query else base
 
 

@@ -20,7 +20,8 @@ ExecStart=/opt/omnissa-agent/venv/bin/python3 -m omnissa_agent.cli classify \
   --state-dir /var/lib/omnissa-analysis/state \
   --reports-dir /var/lib/omnissa-agent/reports \
   --report-group-readable \
-  --focus-in /var/lib/omnissa-agent/drop/focus.json
+  --focus-in /var/lib/omnissa-agent/drop/focus.json \
+  --baseline-file /opt/omnissa-agent/docs/omnissa-partner-baseline.md
 TimeoutStartSec=180
 
 # Hardening: this identity is never in docker/sudo/adm -- see the

@@ -71,6 +71,7 @@ import sys
 import time
 from pathlib import Path
 
+from . import baseline as baseline_mod
 from . import focus as focus_mod
 from . import gmail_ingest, google_oauth, research, router
 from . import lock as lock_mod
@@ -418,7 +419,13 @@ def _draft(args) -> int:
 
 
 def _pipeline_from_ingest_result(
-    ingest_result, *, kind: str, args, quiet_content: bool = False, focus_category: str | None = None
+    ingest_result,
+    *,
+    kind: str,
+    args,
+    quiet_content: bool = False,
+    focus_category: str | None = None,
+    baseline: baseline_mod.Baseline | None = None,
 ) -> int:
     """Shared back half: a verified IngestionResult -> Agent A/B -> report.
 
@@ -463,6 +470,7 @@ def _pipeline_from_ingest_result(
         use_llm=(kind == "brief"),
         llm_combo=llm_combo,
         focus_category=focus_category,
+        baseline=baseline,
         max_messages=args.max_messages,
         state_base=state_base,
     )
@@ -575,7 +583,10 @@ def _run_live(args, *, kind: str) -> int:
     # instruction directly -- no new flag needed here.
     instruction = focus_mod.resolve_focus_instruction(gmail_client)
     focus_category = instruction.category if instruction else None
-    return _pipeline_from_ingest_result(ingest_result, kind=kind, args=args, focus_category=focus_category)
+    baseline = baseline_mod.load_baseline(getattr(args, "baseline_file", None))
+    return _pipeline_from_ingest_result(
+        ingest_result, kind=kind, args=args, focus_category=focus_category, baseline=baseline
+    )
 
 
 def _ingest(args) -> int:
@@ -732,6 +743,11 @@ def _classify(args) -> int:
         if instruction is not None:
             focus_category = instruction.category
 
+    # Baseline scoreboard (see baseline.py + docs/omnissa-partner-baseline.md).
+    # Optional -- omitting --baseline-file renders an honest "not
+    # available" scoreboard, never a crash, never a guess.
+    baseline = baseline_mod.load_baseline(getattr(args, "baseline_file", None))
+
     # scan and brief classify share the SAME --state-dir (and therefore
     # the same checkpoint.json) on the analysis identity. This is
     # ALREADY locked -- pipeline.run_pilot (called via
@@ -744,7 +760,8 @@ def _classify(args) -> int:
     # confirmed live (2026-09-30) as a real regression while adding
     # locking to `ingest`, which had no equivalent existing protection.
     rc = _pipeline_from_ingest_result(
-        ingest_result, kind=args.kind, args=args, quiet_content=True, focus_category=focus_category
+        ingest_result, kind=args.kind, args=args, quiet_content=True,
+        focus_category=focus_category, baseline=baseline,
     )
 
     # Delete the drop file ONLY once every message it held has actually
@@ -879,6 +896,11 @@ def main(argv: list[str] | None = None) -> int:
     run_p.add_argument("--deadline", type=float, default=90.0, help="total ingestion wall-clock budget, seconds")
     run_p.add_argument("--state-dir", default=None)
     run_p.add_argument(
+        "--baseline-file",
+        default=None,
+        help="path to docs/omnissa-partner-baseline.md -- see classify --baseline-file",
+    )
+    run_p.add_argument(
         "--llm-policy",
         choices=["local-only", "combo-continuous"],
         default="local-only",
@@ -940,6 +962,13 @@ def main(argv: list[str] | None = None) -> int:
         "Optional -- omitting it (default) means the normal, unmodified brief, exactly "
         "today's behavior. A missing/corrupt/unrecognized file is silently treated the "
         "same as omitting the flag, never an error.",
+    )
+    classify_p.add_argument(
+        "--baseline-file",
+        default=None,
+        help="path to docs/omnissa-partner-baseline.md (see baseline.py) -- rendered as an "
+        "always-present Scoreboard section, even when zero messages were fetched this run. "
+        "Optional -- omitting it renders an honest 'not available' scoreboard, never a crash.",
     )
     classify_p.add_argument(
         "--llm-policy", choices=["local-only", "combo-continuous"], default="local-only"

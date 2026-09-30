@@ -38,6 +38,26 @@ def test_brief_states_no_external_actions_taken():
     assert "BLOCKED (token expired)" in brief
 
 
+def test_osp_otsp_allego_and_enablement_threads_classify_out_of_general():
+    """Real production gap (2026-09-30): these threads were falling
+    through to General with no keyword match. See
+    docs/omnissa-partner-baseline.md for the sourced facts behind them."""
+    from omnissa_agent.agent_a import classify_message
+    from omnissa_agent.sources import GmailMessage
+
+    def _classify_subject(subject):
+        return classify_message(
+            GmailMessage(id="m", subject=subject, snippet="", sender="x@omnissa.com", date="2026-09-29", label_ids=())
+        ).category
+
+    assert _classify_subject("Complete your OSP training by Friday") == "Training"
+    assert _classify_subject("OTSP module reminder") == "Training"
+    assert _classify_subject("Your Allego course assignment") == "Training"
+    assert _classify_subject("Paul Philips requests enablement completion") == "Training"
+    assert _classify_subject("Preferred distributor selection reminder") == "Deal Registration"
+    assert _classify_subject("Your Partner ID confirmation") == "Access Request"
+
+
 def _findings(*categories):
     return [
         Finding(message_id=f"m{i}", category=c, confidence="Unverified", summary=f"item {i}", source_ref=f"gmail:m{i}")
@@ -90,12 +110,63 @@ def test_build_brief_with_focus_shows_matching_findings_first_and_hides_nothing(
     assert len(lines) == 3  # every finding still present
 
 
-def test_build_brief_without_focus_is_byte_identical_to_before_this_feature():
+def test_build_brief_without_focus_has_no_focus_line():
+    """As of the 2026-09-30 scoreboard feature, build_brief's output is
+    no longer byte-identical to before that feature (a Scoreboard
+    section is now always present, findings or not) -- this only
+    confirms the FOCUS line specifically is absent when no focus_category
+    is given, which is the guarantee reorder_for_focus's docstring makes."""
     findings = _findings("General", "Renewal")
     from omnissa_agent.agent_a import AgentAResult
     result = AgentAResult(findings=findings)
     brief = build_brief(result, email_status="VERIFIED")
     assert "Focus:" not in brief.split("## Findings")[0]  # no focus line when none is given
+
+
+def test_build_brief_always_includes_a_scoreboard_even_with_no_findings_and_no_baseline():
+    """Definition of done for the 2026-09-30 scoreboard slice: a report
+    shows the scoreboard even when Gmail fetched zero new messages --
+    and even when no baseline file was supplied at all, it must render
+    an honest 'not available' line rather than crash or omit the section."""
+    from omnissa_agent.agent_a import AgentAResult
+    result = AgentAResult(findings=[])
+    brief = build_brief(result, email_status="VERIFIED")
+    assert "## Scoreboard" in brief
+    assert "## Scoreboard" in brief.split("## Findings")[0]  # scoreboard renders before Findings
+    assert "not available" in brief
+
+
+def test_build_brief_scoreboard_reflects_a_real_baseline_file(tmp_path):
+    from omnissa_agent.agent_a import AgentAResult
+    from omnissa_agent.baseline import load_baseline
+
+    baseline_path = tmp_path / "baseline.md"
+    baseline_path.write_text(
+        "<!-- SCOREBOARD-DATA\n"
+        "sourced: true\n"
+        "renewal_status: completed\n"
+        "renewal_completed_date: 2026-08-28\n"
+        "renewal_next_date: 2026-06-06\n"
+        "renewal_case: 01696683\n"
+        "osp_requested: 2\n"
+        "otsp_requested: 2\n"
+        "osp_completed: 0\n"
+        "otsp_completed: 0\n"
+        "distributor_commercial: unknown\n"
+        "distributor_healthcare: unknown\n"
+        "distributor_public_sector: unknown\n"
+        "distributor_deadline: 2026-07-31\n"
+        "top_human_action: complete OSP/OTSP; pick distributors\n"
+        "-->\n"
+    )
+    baseline = load_baseline(baseline_path)
+    result = AgentAResult(findings=[])
+    brief = build_brief(result, email_status="VERIFIED", baseline=baseline)
+    assert "completed (completed 2026-08-28, next 2026-06-06, case 01696683)" in brief
+    assert "requested 2/2, completed 0/0" in brief
+    assert "Commercial=unknown" in brief
+    assert "confidence=Confirmed (baseline file marked sourced)" in brief
+    assert "complete OSP/OTSP; pick distributors" in brief
 
 
 def test_agent_b_only_drafts_confirmed_or_likely():

@@ -19,17 +19,26 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 from . import router
+from .baseline import Baseline, render_scoreboard
 from .router import AskResult, DeferredError
 from .sources import GmailMessage
 
 CATEGORY_KEYWORDS = {
     "Grant/Funding": ("grant", "mdf", "development fund", "marketing fund"),
     "Incentive": ("incentive", "rebate", "promotion"),
-    "Training": ("training", "course", "enablement"),
+    # osp/otsp/allego/paul philips added 2026-09-30: real production threads
+    # (Omnissa Sales/Technical Sales Professional enablement, hosted on the
+    # Allego LMS, requested by Paul Philips 2026-08-31 -- see
+    # docs/omnissa-partner-baseline.md) were classifying as General with no
+    # keyword match. Kept as short substrings, same style as the rest of
+    # this table -- "osp"/"otsp" could in principle collide with an
+    # unrelated word (e.g. "hospital"), but this table only ever sees real
+    # Omnissa partner correspondence, not general mail.
+    "Training": ("training", "course", "enablement", "osp", "otsp", "allego", "paul philips"),
     "Certification": ("certification", "cert", "voucher", "exam"),
     "Renewal": ("renewal", "expir",),
-    "Deal Registration": ("deal registration", "opportunity registration"),
-    "Access Request": ("access", "partner connect", "portal"),
+    "Deal Registration": ("deal registration", "opportunity registration", "preferred distributor"),
+    "Access Request": ("access", "partner connect", "portal", "partner id"),
     "Product/NFR": ("nfr", "evaluation", "test-drive", "proving ground"),
 }
 
@@ -116,6 +125,7 @@ def build_brief(
     use_llm: bool = False,
     llm_combo: str = router.LOCAL_ONLY_COMBO,
     focus_category: str | None = None,
+    baseline: Baseline | None = None,
 ) -> str:
     """Build the markdown brief.
 
@@ -131,11 +141,21 @@ def build_brief(
     ``focus.FocusInstruction`` -- see reorder_for_focus above. Anything
     else (no instruction, invalid, stale) must pass ``None`` here,
     which reproduces the exact unmodified brief.
+
+    ``baseline``: loaded from docs/omnissa-partner-baseline.md (see
+    baseline.py) -- rendered as the Scoreboard section ALWAYS, even
+    when `result.findings` is empty, so the brief keeps surfacing known
+    open gaps (e.g. an unresolved distributor deadline) instead of only
+    reporting on whatever Gmail happened to fetch this specific hour.
+    `None` (file missing/unreadable) renders an honest "not available"
+    line rather than a crash or an invented status.
     """
     lines = [
         "# GJH INC -- Omnissa Daily Brief",
         "",
         f"Authorized email label status: {email_status}",
+        "",
+        render_scoreboard(baseline, result.findings),
         "",
     ]
     if focus_category:

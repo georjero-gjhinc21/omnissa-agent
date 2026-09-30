@@ -431,6 +431,52 @@ this capability has to wait for the operator's own `gmail.compose`
 OAuth re-consent AND a deliberate decision to relax that test, not
 happen quietly alongside an unrelated feature.
 
+## 5d. Scoreboard -- always-present partner status (2026-09-30)
+
+**Problem this fixes:** the deployed hourly/daily brief was technically
+correct but not useful — most hours it just says "- none this run,"
+and even when Gmail returns messages, every finding renders as
+`[General] <subject> -- confidence=Unverified` with no partner-status
+context. Two real, open gaps (OSP/OTSP enablement completion, preferred
+distributor selection) were invisible unless a human already knew to
+go looking for them.
+
+**Fix:** `docs/omnissa-partner-baseline.md` now carries real, sourced
+partner-status facts (Partner ID, renewal, the OSP/OTSP gap, the
+preferred-distributor gap — each cited to a Gmail thread + date, no
+invented status) plus a small machine-readable `<!-- SCOREBOARD-DATA
+... -->` block. `baseline.py` parses that block (never the free-form
+prose — deliberately not scraped, so a wording edit can't silently
+break rendering) and `agent_a.build_brief` renders it as a `##
+Scoreboard` section **unconditionally, before `## Findings`, even when
+zero messages were fetched that run**. Confidence on every
+baseline-derived row is `Unverified` unless the file's own `sourced:
+true` line says otherwise — this is never upgraded by the code's own
+judgment.
+
+**Wiring:** `classify --baseline-file <path>` (optional, default None
+→ honest "not available" scoreboard, never a crash). `deploy-root.sh`
+now also copies just this one file to
+`/opt/omnissa-agent/docs/omnissa-partner-baseline.md` (root-owned,
+world-readable — nothing else under `docs/` is shipped, since nothing
+else is read by any running process); both analysis unit files pass
+`--baseline-file` pointing there. **Takes effect only after the next
+`deploy-root.sh` run**, same as every other source change.
+
+**Also fixed the same day:** `CATEGORY_KEYWORDS` (`agent_a.py`) gained
+`osp`, `otsp`, `allego`, `paul philips` → `Training`, and `preferred
+distributor` → `Deal Registration`, `partner id` → `Access Request` —
+real production threads that were falling through to `General` with
+no keyword match at all. And `gmail_scope.py` (a standalone guard
+module, never actually wired into the real ingest path, and stale
+since before this system existed — `consult@gjh-inc.com` + label
+`"Omnissa"`, neither ever real) now imports its constants FROM
+`gmail_ingest.py` instead of duplicating its own, and
+`gmail_ingest.run_ingestion` calls it as a redundant second guard layer
+right after resolving the real account/label — defense in depth that
+can never actually fire in normal operation since both sides read the
+same constants now.
+
 ## 6. Data retention
 
 - Reports/drafts accumulate under `/var/lib/omnissa-agent/reports/`

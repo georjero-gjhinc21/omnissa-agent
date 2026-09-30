@@ -1,16 +1,25 @@
 # omnissa-agent
 
-Scoped Gmail + revenue-research agent for Omnissa partnership work
-as `consult@gjh-inc.com`. One Orca worktree, **two main agents max**
-(per Tonbi/Orca workflow in `ORCA-WORKFLOW.md`).
+Scoped Gmail + revenue-research agent for Omnissa partnership work,
+reading `george@gjh-inc.com`'s `Archive_/@omnissa.com` label. One Orca
+worktree, **two main agents max** (per Tonbi/Orca workflow in
+`ORCA-WORKFLOW.md`) for development; the live 24x7 pipeline itself runs
+as two dedicated, restricted systemd identities, never as Orca or
+either development agent — see the 24x7 section below.
 
-## Scope (day one)
+## Scope (production, as of 2026-09-30)
 
-- **Read-only**, Gmail **label `Omnissa` only**. No send, no other labels.
+- **Read-only**, Gmail account `george@gjh-inc.com`, exact label
+  `Archive_/@omnissa.com` only. No send, no other labels, no label
+  mutation anywhere in the codebase (`tests/test_no_write_capability.py`
+  enforces this as a standing check). `consult@gjh-inc.com` + label
+  `Omnissa` was day-one placeholder text and was never the real
+  mailbox/label — see `docs/operations-record.md` for the actual
+  architecture and `gmail_scope.py` for the (now-corrected) scope guard.
 - Understand GJH Inc business, research Omnissa partner / grants program
   (already a partner), surface revenue angles.
-- Coursework prep as `consult@gjh-inc.com` (research + checklists only,
-  no credential submission without explicit approval).
+- Coursework prep (research + checklists only, no credential submission
+  without explicit approval).
 
 ## Two-agent split
 
@@ -39,6 +48,11 @@ python3 -m pytest tests/ -q
 
 ## 24x7
 
-Day one = on-demand only. Continuous polling (Orca automation / systemd)
-is designed in `infra/24x7/` but **not enabled** until Gmail OAuth
-read-only + label scope are approved. See `.agent/TASK.md`.
+**Live.** Two systemd timers run this unattended: `omnissa-ingest-scan.timer`
+(hourly) and `omnissa-ingest-brief.timer` (daily 07:45 Central), each
+driving a privilege-separated ingest+classify pair — never Orca, never
+a coding-agent process, never `george`'s/`consult@`'s own account.
+See `docs/operations-record.md` for the full architecture,
+`infra/24x7/README.md` for what's viewable read-only and how, and
+`infra/24x7/omnissa-status.sh` for a quick status check. Disable with:
+`sudo systemctl disable --now omnissa-ingest-scan.timer omnissa-ingest-brief.timer`.
