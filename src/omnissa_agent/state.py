@@ -58,10 +58,32 @@ def save_state(state: dict, base: Path | None = None) -> None:
         ids = state.get(key, [])
         if len(ids) > MAX_SEEN_IDS:
             state[key] = ids[-MAX_SEEN_IDS:]
+
+    # Capture the EXISTING file's owner before we replace it. Confirmed
+    # live (2026-09-30) as a real production outage, not a theoretical
+    # concern: `requeue --verify-unclassified-against` must run as root
+    # (it reads a second identity's private checkpoint to cross-check
+    # against), and root rewriting this file via the atomic tmp+replace
+    # below silently made it root-owned -- the systemd service running
+    # as the ORIGINAL owning identity (omnissa-ingest) could then no
+    # longer even read its own checkpoint. Preserve the original
+    # owner whenever we're root rewriting a file we don't natively own.
+    original_owner = None
+    if path.exists():
+        st = path.stat()
+        original_owner = (st.st_uid, st.st_gid)
+
     tmp = path.with_suffix(".tmp")
     with tmp.open("w") as f:
         json.dump(state, f, indent=2)
     os.chmod(tmp, stat.S_IRUSR | stat.S_IWUSR)  # 600
+
+    if original_owner is not None and os.geteuid() == 0:
+        try:
+            os.chown(tmp, *original_owner)
+        except OSError:
+            pass  # best-effort; a real failure here still leaves the file readable by root
+
     tmp.replace(path)  # atomic on same filesystem
 
 

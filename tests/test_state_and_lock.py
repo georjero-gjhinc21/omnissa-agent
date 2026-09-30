@@ -2,6 +2,70 @@ from omnissa_agent import state as state_mod
 from omnissa_agent.lock import AlreadyRunningError, SingleInstanceLock
 
 
+def test_save_state_preserves_original_owner_when_run_as_root(tmp_path, monkeypatch):
+    """Regression for a real, live production outage (2026-09-30): a
+    root-run save (e.g. `requeue --verify-unclassified-against`, which
+    must run as root to read a second identity's private checkpoint)
+    silently rewrote the checkpoint as root-owned via the atomic
+    tmp+replace, and the systemd service running as the file's ORIGINAL
+    owning identity could then no longer even read its own checkpoint.
+    """
+    st = state_mod.load_state(tmp_path)
+    state_mod.mark_seen(st, "m1")
+    state_mod.save_state(st, tmp_path)
+    checkpoint = tmp_path / "checkpoint.json"
+    original_uid_gid = (checkpoint.stat().st_uid, checkpoint.stat().st_gid)
+
+    chown_calls = []
+    monkeypatch.setattr(state_mod.os, "geteuid", lambda: 0)  # simulate running as root
+    monkeypatch.setattr(state_mod.os, "chown", lambda path, uid, gid: chown_calls.append((uid, gid)))
+
+    st2 = state_mod.load_state(tmp_path)
+    state_mod.mark_seen(st2, "m2")
+    state_mod.save_state(st2, tmp_path)
+
+    assert chown_calls == [original_uid_gid], (
+        "a root-run save must chown the rewritten file back to its original owner"
+    )
+
+
+def test_save_state_does_not_chown_when_not_running_as_root(tmp_path, monkeypatch):
+    state_mod.save_state(state_mod.load_state(tmp_path), tmp_path)  # create the file first
+
+    chown_calls = []
+    monkeypatch.setattr(state_mod.os, "chown", lambda *a: chown_calls.append(a))
+    # os.geteuid is NOT mocked here -- this test runs as the normal
+    # (non-root) test user, so no chown should ever be attempted
+    state_mod.save_state(state_mod.load_state(tmp_path), tmp_path)
+    assert chown_calls == []
+
+
+def test_save_state_first_ever_write_as_root_does_not_attempt_chown(tmp_path, monkeypatch):
+    """No pre-existing file means no original owner to preserve."""
+    monkeypatch.setattr(state_mod.os, "geteuid", lambda: 0)
+    chown_calls = []
+    monkeypatch.setattr(state_mod.os, "chown", lambda *a: chown_calls.append(a))
+    state_mod.save_state(state_mod.load_state(tmp_path), tmp_path)
+    assert chown_calls == []
+
+
+def test_save_state_chown_failure_does_not_crash_the_save(tmp_path, monkeypatch):
+    """Best-effort: if chown itself fails for some other reason, the save
+    must still complete (the file remains at least root-readable) rather
+    than raising and losing the write entirely."""
+    state_mod.save_state(state_mod.load_state(tmp_path), tmp_path)
+    monkeypatch.setattr(state_mod.os, "geteuid", lambda: 0)
+
+    def boom(*a):
+        raise OSError("simulated chown failure")
+
+    monkeypatch.setattr(state_mod.os, "chown", boom)
+    st = state_mod.load_state(tmp_path)
+    state_mod.mark_seen(st, "m1")
+    state_mod.save_state(st, tmp_path)  # must not raise
+    assert "m1" in state_mod.load_state(tmp_path)["seen_ids"]
+
+
 def test_state_roundtrip_and_permissions(tmp_path):
     st = state_mod.load_state(tmp_path)
     assert st == {"seen_ids": [], "gmail_ingested_ids": [], "last_run": None}
