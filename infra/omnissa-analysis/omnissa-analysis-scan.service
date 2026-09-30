@@ -37,8 +37,14 @@ RestrictNamespaces=yes
 LockPersonality=yes
 MemoryDenyWriteExecute=yes
 CapabilityBoundingSet=
-ReadWritePaths=/var/lib/omnissa-analysis /var/lib/omnissa-agent/reports
-ReadOnlyPaths=/var/lib/omnissa-agent/drop
+# drop is ReadWrite, not ReadOnly: classify deletes a drop file once it
+# has consumed it (see cli.py classify + the ACL grant in
+# deploy-root.sh) -- ProtectSystem=strict blocks ANY write here
+# regardless of DAC/ACL permissions unless the path is explicitly
+# listed. Confirmed live (2026-09-30) that ReadOnlyPaths here caused
+# every delete to fail silently ("Read-only file system"), so consumed
+# drop files were never actually removed.
+ReadWritePaths=/var/lib/omnissa-analysis /var/lib/omnissa-agent/reports /var/lib/omnissa-agent/drop
 # Real content only ever needs to reach the local OmniRoute gateway
 # (combo-private/Ollama by default). Widening to combo-continuous is a
 # conscious, separate operator decision -- and would ALSO require

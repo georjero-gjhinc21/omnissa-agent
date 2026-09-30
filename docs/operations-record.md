@@ -45,6 +45,41 @@ root:root`) — the same pattern that already worked correctly for
 output path is never implicitly derived from (and therefore trapped
 inside) `--state-dir` again.
 
+**2026-09-30, same day — two more real bugs found via live read-only
+inspection before enabling anything:**
+
+1. **Delete-on-consume silently failed in production.** The deployed
+   brief run logged `WARNING: ... could not remove
+   /var/lib/omnissa-agent/drop/latest-brief.json: [Errno 30] Read-only
+   file system`. The drop directory was `ReadOnlyPaths=` for the
+   analysis systemd units, and its own DAC mode only gave the shared
+   reader group `r-x`. Consumed drop files were never actually deleted,
+   so every subsequent ingest merged into an ever-growing file and
+   every classify re-processed everything (`duplicates_skipped=83` and
+   climbing). Fixed with a per-user ACL
+   (`setfacl -m u:omnissa-analysis:rwx`) on the drop directory — NOT a
+   group-mode change, which would have also handed `georjero` write
+   access since it shares that same reader group — plus moving the
+   drop path from `ReadOnlyPaths=` to `ReadWritePaths=` in both analysis
+   units (`ProtectSystem=strict` blocks writes to a path regardless of
+   DAC/ACL permissions unless it's explicitly listed).
+2. **No locking around either shared checkpoint, and a lock-skip could
+   have deleted real data.** `ingest` and `classify` never called into
+   the existing, already-tested `lock.py` after the ingest/classify
+   split — scan and brief share one checkpoint file per identity with
+   no protection against a concurrent run. Added `SingleInstanceLock`
+   to `_ingest`. Found live, while testing this, that
+   `pipeline.run_pilot` (called by `classify`) already had its OWN
+   internal lock on the same file — a second lock on top of it
+   self-blocked on `flock` (per-open-file-description, not per-process)
+   and, worse, `classify`'s delete-on-consume didn't check whether
+   `run_pilot` had actually run or been lock-skipped, so a skipped run
+   would have deleted a real, never-processed drop file. Fixed: no
+   second lock in `classify` (relies on `run_pilot`'s existing one), and
+   `_pipeline_from_ingest_result` now detects a lock-skip explicitly and
+   returns a distinct `LOCKED` (exit 7) that `classify` checks before
+   ever unlinking its input.
+
 ## 1. Architecture — who runs what
 
 | Stage | Process / identity | Code | Network it can reach |
@@ -161,6 +196,7 @@ cat /var/lib/omnissa-agent/reports/<latest>.md
 | 4 | Unexpected error — bad input/config | inspect stderr; nothing partially written |
 | 5 | RATE_LIMITED — Gmail is throttling this account | transient; next scheduled run retries |
 | 6 | PARTIAL — ingestion deadline reached before all messages were fetched | data written is genuine but incomplete; unprocessed ids are NOT marked seen, next run retries them automatically. The brief text itself also says `VERIFIED (PARTIAL -- ingestion deadline reached)` — this is visible in the report, not just the exit code. |
+| 7 | LOCKED — another instance already held this identity's checkpoint lock (scan and brief share one per identity) | not a failure; this run was skipped cleanly rather than racing it, input is left untouched, the next scheduled run tries again normally |
 
 **No alerting is configured.** `systemctl status`/`journalctl`/exit
 codes are pull-only — nothing pages or emails on failure (email would
@@ -193,18 +229,32 @@ Built for the incident in §0: never wipe a whole checkpoint to recover
 from a gap. Both commands are read-only or self-backing-up; neither
 touches Gmail.
 
+**`reconcile` must run as root, not `sudo -u <identity>`.** It reads
+BOTH checkpoints at once, and `omnissa-ingest`/`omnissa-analysis` are
+deliberately unable to read each other's private state (0700, no shared
+group) — that mutual isolation is intentional and is not weakened for
+this tool. Only root can read both files without granting either
+identity a new cross-read permission. `requeue` only ever touches ONE
+checkpoint (the one named by `--state-dir`), so it's fine to run it as
+that checkpoint's own owning identity via `sudo -u`.
+
 ```sh
-# 1. READ-ONLY: which ids were fetched but never classified?
-sudo -u omnissa-ingest /opt/omnissa-agent/venv/bin/python3 -m omnissa_agent.cli reconcile \
+# 1. READ-ONLY: which ids were fetched but never classified? (root -- reads both checkpoints)
+sudo /opt/omnissa-agent/venv/bin/python3 -m omnissa_agent.cli reconcile \
   --ingest-state-dir /var/lib/omnissa-ingest/state \
   --analysis-state-dir /var/lib/omnissa-analysis/state
 # -> fetched=N classified=M pending=K, plus the K pending ids (ids only, no content)
 
-# 2. Requeue exactly those ids (backs up the checkpoint first, automatically)
-sudo -u omnissa-ingest /opt/omnissa-agent/venv/bin/python3 -m omnissa_agent.cli requeue \
+# 2. Requeue exactly those ids (backs up the checkpoint first, automatically;
+#    --verify-unclassified-against double-checks against the analysis
+#    checkpoint and refuses if any requested id turns out to already be
+#    classified -- also needs root, since it too reads the other identity's
+#    state)
+sudo /opt/omnissa-agent/venv/bin/python3 -m omnissa_agent.cli requeue \
   --state-dir /var/lib/omnissa-ingest/state \
-  --ids <comma-separated pending ids from step 1> \
-  --backup-dir /var/lib/omnissa-ingest/recovery-backups
+  --ids <comma-separated pending ids from step 1, e.g. 1a0abc111,1a0abc222> \
+  --backup-dir /var/lib/omnissa-ingest/recovery-backups \
+  --verify-unclassified-against /var/lib/omnissa-analysis/state
 
 # 3. Re-fetch them for real (higher limits than the default hourly run,
 #    to guarantee one pass covers the whole backlog even if new mail
@@ -222,8 +272,8 @@ sudo -u omnissa-analysis /opt/omnissa-agent/venv/bin/python3 -m omnissa_agent.cl
   --state-dir /var/lib/omnissa-analysis/state \
   --reports-dir /var/lib/omnissa-agent/reports --report-group-readable
 
-# 5. Confirm: pending should now be 0
-sudo -u omnissa-ingest /opt/omnissa-agent/venv/bin/python3 -m omnissa_agent.cli reconcile \
+# 5. Confirm: pending should now be 0 (root again)
+sudo /opt/omnissa-agent/venv/bin/python3 -m omnissa_agent.cli reconcile \
   --ingest-state-dir /var/lib/omnissa-ingest/state \
   --analysis-state-dir /var/lib/omnissa-analysis/state
 ```

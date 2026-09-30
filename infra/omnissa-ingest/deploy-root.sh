@@ -157,8 +157,20 @@ chmod 600 "$ING_HOME/google"/*.json 2>/dev/null || true
 [[ -f "$ING_HOME/google/client_secret.json" ]] || echo "WARNING: no client_secret.json in place yet -- copy it to $ING_HOME/google/client_secret.json (owner $ING_USER, mode 600) before enabling timers." >&2
 [[ -f "$ING_HOME/google/token.json" ]] || echo "WARNING: no token.json in place yet." >&2
 
-echo "== 3. drop directory (one-way: $ING_USER writes, $READ_GROUP reads only) =="
+echo "== 3. drop directory ($ING_USER writes; $READ_GROUP reads; $ANA_USER ALSO deletes what it consumes) =="
 install -d -o "$ING_USER" -g "$READ_GROUP" -m 2750 "$DROP_DIR"
+# omnissa-analysis deletes a drop file once it has classified it (see
+# cli.py classify's delete-on-consume) -- unlinking a directory entry
+# needs write+execute on the DIRECTORY regardless of the file's own
+# mode. A plain group-write bit on $READ_GROUP would ALSO hand georjero
+# write access (georjero is in that same group, for read-only purposes
+# only) -- confirmed live (2026-09-30) that this needed a real fix, not
+# just documentation: the deployed brief run logged "Read-only file
+# system" trying to delete a consumed drop file, so the file was never
+# actually removed and duplicates_skipped grew every single run. A
+# per-user ACL grants exactly $ANA_USER what it needs without touching
+# $READ_GROUP's own (still read-only) permission bits.
+setfacl -m "u:$ANA_USER:rwx" "$DROP_DIR"
 
 echo "== 4. deploy reviewed code to $OPT_DIR (root-owned, not writable by $CALLER_USER) =="
 mkdir -p "$OPT_DIR"
@@ -216,6 +228,7 @@ check "$CALLER_USER cannot read client_secret.json" yes test -r "$ING_HOME/googl
 check "$CALLER_USER cannot write the deployed ingestion code" yes test -w "$OPT_DIR/src/omnissa_agent/cli.py"
 check "$CALLER_USER cannot read omnissa-analysis's state dir" yes test -r "$ANA_HOME/state"
 check "$CALLER_USER CAN reach the shared reports directory" no test -x "$REPORTS_DIR"
+check "$CALLER_USER still cannot write the drop directory (ACL grant is $ANA_USER-specific)" yes test -w "$DROP_DIR"
 
 echo "-- privileged-unit access: NON-MUTATING policy check -- never actually starts/stops/enables anything --"
 # A deploy-time check must never risk performing the very action it is

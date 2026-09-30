@@ -56,6 +56,10 @@ Exit codes (a scheduler should branch on these, not on stdout text):
      skipping them. The brief itself also says "VERIFIED (PARTIAL --
      ingestion deadline reached)" so this is visible in the report text
      too, not only in the exit code.
+  7  LOCKED: another instance already held this state dir's lock (scan
+     and brief share one checkpoint per identity) -- this run was
+     skipped cleanly rather than racing it. Not a failure; the next
+     scheduled run tries again normally.
 """
 
 from __future__ import annotations
@@ -68,6 +72,7 @@ import time
 from pathlib import Path
 
 from . import gmail_ingest, google_oauth, router
+from . import lock as lock_mod
 from . import state as state_mod
 from .agent_a import Finding
 from .agent_b import draft_from_finding
@@ -80,6 +85,7 @@ LLM_DEFERRED = 3
 UNEXPECTED_ERROR = 4
 RATE_LIMITED = 5
 PARTIAL = 6  # ingestion deadline reached -- data is real but incomplete, not a failure
+LOCKED = 7  # another instance already holds this state dir's lock -- skipped, not a failure
 
 _INGEST_STATUS_TO_EXIT_CODE = {
     gmail_ingest.IngestStatus.AUTH_FAILURE: REFUSED,
@@ -293,6 +299,15 @@ def _requeue(args) -> int:
     checkpoint wipe. Backs up the checkpoint file (timestamped, full
     copy) to ``--backup-dir`` BEFORE making any change. Nothing is
     fetched here; this only edits local bookkeeping.
+
+    ``--verify-unclassified-against`` is an optional safety cross-check:
+    given the ANALYSIS checkpoint's own state dir, refuses to requeue any
+    id that's already present in its ``seen_ids`` -- i.e. genuinely
+    already classified, not actually part of the backlog. Without this
+    flag, requeue trusts the caller's id list as-is (it only knows about
+    the ONE checkpoint named by ``--state-dir``; it never reads the
+    other identity's private state unless explicitly told to and given
+    read access to it -- e.g. by being run as root).
     """
     state_base = Path(args.state_dir) if args.state_dir else None
     checkpoint_path = state_mod.state_dir(state_base) / "checkpoint.json"
@@ -309,6 +324,18 @@ def _requeue(args) -> int:
     if not ids_to_remove:
         print("ERROR: no ids given (--ids or --ids-file)", file=sys.stderr)
         return UNEXPECTED_ERROR
+
+    if args.verify_unclassified_against:
+        analysis_state = state_mod.load_state(Path(args.verify_unclassified_against))
+        already_classified = set(analysis_state.get("seen_ids", [])) & set(ids_to_remove)
+        if already_classified:
+            print(
+                f"REFUSED: {len(already_classified)} requested id(s) are already classified "
+                f"(present in seen_ids) -- not genuinely part of the backlog, refusing to "
+                f"requeue them: {sorted(already_classified)}",
+                file=sys.stderr,
+            )
+            return REFUSED
 
     backup_dir = Path(args.backup_dir)
     backup_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -404,6 +431,20 @@ def _pipeline_from_ingest_result(ingest_result, *, kind: str, args) -> int:
         max_messages=args.max_messages,
         state_base=state_base,
     )
+    if report.email_status == "SKIPPED_ALREADY_RUNNING":
+        # run_pilot's OWN lock (held since before the ingest/classify
+        # split) was already held by a concurrent run on this state dir.
+        # Nothing was classified -- write no report, and critically,
+        # tell the caller so it does NOT treat the input as consumed.
+        # Confirmed live (2026-09-30) as a real gap: classify's
+        # delete-on-consume previously fired on ANY ingest_result.status
+        # == OK, blind to whether run_pilot actually ran -- a lock-skip
+        # would otherwise delete real, never-processed data, recreating
+        # the original incident in a new place.
+        print("LOCKED: another classify run already holds this state dir's lock -- "
+              "skipping this cycle cleanly; input left untouched for the next run.",
+              file=sys.stderr)
+        return LOCKED
     file_mode = 0o640 if getattr(args, "report_group_readable", False) else 0o600
     reports_dir = getattr(args, "reports_dir", None)
     path = _write_report(kind, report, state_base=state_base, file_mode=file_mode, reports_dir=reports_dir)
@@ -487,6 +528,29 @@ def _ingest(args) -> int:
         return UNEXPECTED_ERROR
 
     state_base = Path(args.state_dir) if args.state_dir else None
+
+    # scan and brief ingest share the SAME --state-dir (and therefore the
+    # same checkpoint.json) on this identity. Without a lock, an overlap
+    # (a manual trigger colliding with a scheduled run, or a slow run
+    # running past the next cycle) is a real read-modify-write race on
+    # that shared file AND on the shared drop file's merge -- the exact
+    # same class of bug as the original drop-overwrite incident, just
+    # via concurrency instead of sequencing. Confirmed missing (2026-09-30):
+    # cli.py never called into lock.py at all after the ingest/classify
+    # split, even though lock.py itself was built and tested earlier.
+    try:
+        with lock_mod.SingleInstanceLock(base=state_base):
+            return _ingest_locked(args, client_config, access_token, state_base)
+    except lock_mod.AlreadyRunningError:
+        print(
+            "LOCKED: another ingest run already holds this state dir's lock -- "
+            "skipping this cycle cleanly rather than racing it.",
+            file=sys.stderr,
+        )
+        return LOCKED
+
+
+def _ingest_locked(args, client_config, access_token, state_base) -> int:
     gmail_client = GmailReadonlyClient(access_token)
     ingest_result = gmail_ingest.run_ingestion(
         gmail_client,
@@ -561,6 +625,17 @@ def _classify(args) -> int:
             )
             return REFUSED
 
+    # scan and brief classify share the SAME --state-dir (and therefore
+    # the same checkpoint.json) on the analysis identity. This is
+    # ALREADY locked -- pipeline.run_pilot (called via
+    # _pipeline_from_ingest_result below) has wrapped its body in
+    # SingleInstanceLock(base=state_base) since long before the
+    # ingest/classify split. Do NOT add a second lock on the same file
+    # here: flock is per-open-file-description, so a second open+flock
+    # on the same path from this same process would see run_pilot's own
+    # lock as "already held" and self-block on every single run --
+    # confirmed live (2026-09-30) as a real regression while adding
+    # locking to `ingest`, which had no equivalent existing protection.
     rc = _pipeline_from_ingest_result(ingest_result, kind=args.kind, args=args)
 
     # Delete the drop file ONLY once its data has actually been
@@ -568,9 +643,10 @@ def _classify(args) -> int:
     # LLM step was deferred or the ingest side was partial). This is
     # what tells the NEXT `ingest` run there is nothing pending to merge
     # with. On a refusal (bad account/label recorded in the file, or
-    # unreadable input), the file is left in place for inspection/retry
-    # -- never silently discarded.
-    if ingest_result.status == gmail_ingest.IngestStatus.OK:
+    # unreadable input), OR a lock-skip (rc == LOCKED -- nothing was
+    # actually processed this run), the file is left in place for
+    # inspection/retry -- never silently discarded.
+    if ingest_result.status == gmail_ingest.IngestStatus.OK and rc != LOCKED:
         try:
             in_path.unlink()
         except OSError as exc:
@@ -659,6 +735,13 @@ def main(argv: list[str] | None = None) -> int:
     requeue_p.add_argument("--ids", default="", help="comma-separated ids to remove")
     requeue_p.add_argument("--ids-file", default=None, help="path to a file with one id per line")
     requeue_p.add_argument("--backup-dir", required=True, help="where to write a timestamped checkpoint backup first")
+    requeue_p.add_argument(
+        "--verify-unclassified-against",
+        default=None,
+        help="path to the ANALYSIS checkpoint's state dir -- refuses to requeue any id already "
+        "present in its seen_ids (genuinely already classified). Requires read access to that "
+        "identity's private state (e.g. run this command as root).",
+    )
 
     run_p = sub.add_parser("run", help="THE LIVE PATH: real Gmail ingestion -> pipeline")
     run_p.add_argument("--kind", choices=["scan", "brief"], required=True)

@@ -177,6 +177,74 @@ def test_classify_accepts_fresh_drop_file_within_max_age(tmp_path):
     assert rc == 0
 
 
+def test_ingest_skips_cleanly_when_another_instance_holds_the_lock(tmp_path, monkeypatch, capsys):
+    """Regression: scan and brief ingest share one --state-dir (one
+    checkpoint per identity). Without a lock this is a real race; with
+    it, a concurrent attempt must be skipped cleanly, not corrupt state
+    or crash.
+    """
+    from omnissa_agent.lock import SingleInstanceLock
+
+    monkeypatch.setattr(cli.google_oauth, "refresh_access_token", lambda cc, tp: "at")
+    monkeypatch.setattr(
+        cli.gmail_ingest,
+        "run_ingestion",
+        lambda *a, **k: gmail_ingest.IngestionResult(status=gmail_ingest.IngestStatus.OK, account="x", label_id="L", label_name="L"),
+    )
+
+    state_dir = tmp_path / "ingest-state"
+    out = tmp_path / "drop.json"
+    with SingleInstanceLock(base=state_dir):  # simulate a concurrent (e.g. brief) ingest run
+        rc = cli.main(
+            [
+                "ingest",
+                "--client-secret", str(_fake_client_secret(tmp_path)),
+                "--token", str(_fake_token(tmp_path)),
+                "--out", str(out),
+                "--state-dir", str(state_dir),
+            ]
+        )
+    assert rc == cli.LOCKED
+    assert not out.exists(), "a skipped run must not write anything"
+    assert "LOCKED" in capsys.readouterr().err
+
+
+def test_classify_skips_cleanly_when_another_instance_holds_the_lock(tmp_path):
+    """classify's lock protection comes from pipeline.run_pilot (existing
+    since before the ingest/classify split) -- confirm it actually works
+    end to end through `classify`, and that classify does NOT also
+    acquire a second, colliding lock of its own (regression: adding one
+    caused every classify run to self-block, since flock is per-open-file
+    -description, not per-process -- fixed 2026-09-30).
+    """
+    from omnissa_agent.lock import SingleInstanceLock
+
+    drop = tmp_path / "drop.json"
+    result = gmail_ingest.IngestionResult(status=gmail_ingest.IngestStatus.OK, account="x", label_id="L", label_name="L")
+    drop.write_text(json.dumps(result.to_json_dict()))
+
+    state_dir = tmp_path / "analysis-state"
+    with SingleInstanceLock(base=state_dir):  # simulate a concurrent (e.g. brief) classify run
+        rc = cli.main(["classify", "--kind", "scan", "--ingest-result", str(drop), "--state-dir", str(state_dir)])
+    assert rc == cli.LOCKED
+    assert drop.exists(), "a lock-skipped run must not delete input it never actually processed"
+    assert not (state_dir / "reports").exists(), "a lock-skipped run must not write a misleading placeholder report"
+
+
+def test_classify_does_not_self_block_on_a_normal_uncontended_run(tmp_path):
+    """A plain, uncontended classify call must succeed and consume its
+    input -- guards against ever reintroducing the double-lock
+    regression, where EVERY run (not just concurrent ones) self-blocked.
+    """
+    drop = tmp_path / "drop.json"
+    result = gmail_ingest.IngestionResult(status=gmail_ingest.IngestStatus.OK, account="x", label_id="L", label_name="L")
+    drop.write_text(json.dumps(result.to_json_dict()))
+
+    rc = cli.main(["classify", "--kind", "scan", "--ingest-result", str(drop), "--state-dir", str(tmp_path / "state")])
+    assert rc == 0
+    assert not drop.exists()
+
+
 def test_ingest_reports_partial_not_ok_when_deadline_hit(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(cli.google_oauth, "refresh_access_token", lambda cc, tp: "at")
     monkeypatch.setattr(

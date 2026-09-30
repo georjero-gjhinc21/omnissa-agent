@@ -141,6 +141,56 @@ def test_requeue_reports_ids_not_present_without_erroring(tmp_path, capsys):
     assert "not present" in capsys.readouterr().err
 
 
+def test_requeue_refuses_ids_already_classified_when_verify_flag_given(tmp_path, capsys):
+    ingest_dir = tmp_path / "ingest-state"
+    st = state_mod.load_state(ingest_dir)
+    for mid in ("m1", "m2"):
+        state_mod.mark_seen(st, mid, key="gmail_ingested_ids")
+    state_mod.save_state(st, ingest_dir)
+
+    analysis_dir = tmp_path / "analysis-state"
+    analysis_state = state_mod.load_state(analysis_dir)
+    state_mod.mark_seen(analysis_state, "m1", key="seen_ids")  # m1 WAS actually classified
+    state_mod.save_state(analysis_state, analysis_dir)
+
+    rc = cli.main(
+        [
+            "requeue",
+            "--state-dir", str(ingest_dir),
+            "--ids", "m1,m2",  # m1 should NOT be requeued -- it's genuinely done
+            "--backup-dir", str(tmp_path / "backups"),
+            "--verify-unclassified-against", str(analysis_dir),
+        ]
+    )
+    assert rc == cli.REFUSED
+    assert "m1" in capsys.readouterr().err
+    # nothing changed -- the whole call refuses rather than partially applying
+    assert state_mod.load_state(ingest_dir)["gmail_ingested_ids"] == ["m1", "m2"]
+
+
+def test_requeue_verify_flag_allows_genuinely_unclassified_ids(tmp_path):
+    ingest_dir = tmp_path / "ingest-state"
+    st = state_mod.load_state(ingest_dir)
+    for mid in ("m1", "m2"):
+        state_mod.mark_seen(st, mid, key="gmail_ingested_ids")
+    state_mod.save_state(st, ingest_dir)
+
+    analysis_dir = tmp_path / "analysis-state"
+    state_mod.save_state(state_mod.load_state(analysis_dir), analysis_dir)  # nothing classified yet
+
+    rc = cli.main(
+        [
+            "requeue",
+            "--state-dir", str(ingest_dir),
+            "--ids", "m1,m2",
+            "--backup-dir", str(tmp_path / "backups"),
+            "--verify-unclassified-against", str(analysis_dir),
+        ]
+    )
+    assert rc == 0
+    assert state_mod.load_state(ingest_dir)["gmail_ingested_ids"] == []
+
+
 def test_reconcile_and_requeue_full_incident_recovery_flow(tmp_path, capsys):
     """Replay the real incident's shape end to end: 50 (here 3) messages
     fetched, none classified (drop overwritten before consumption) ->

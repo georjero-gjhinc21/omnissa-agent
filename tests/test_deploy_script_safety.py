@@ -219,6 +219,37 @@ def test_units_reference_the_privilege_separated_cli_commands():
         assert "--max-age-s" in u.read_text(), "must refuse stale drop data, not just old-but-present"
 
 
+def test_deploy_grants_analysis_delete_access_to_drop_via_per_user_acl_not_group_bit():
+    """Regression for a real bug (2026-09-30): classify's delete-on-consume
+    failed in production ('Read-only file system') because the drop dir
+    was ReadOnlyPaths for the analysis unit and its group bit was r-x.
+    The fix must grant omnissa-analysis specifically (via ACL), not widen
+    the shared reader group's own bits -- georjero is in that same group
+    and must stay read-only."""
+    text = DEPLOY.read_text()
+    assert 'setfacl -m "u:$ANA_USER:rwx" "$DROP_DIR"' in text
+    # must NOT have simply widened the group-mode bits instead (that would
+    # also hand georjero write access, since georjero shares $READ_GROUP)
+    assert '-m 2770 "$DROP_DIR"' not in text
+
+
+def test_deploy_still_denies_georjero_write_on_drop_after_the_acl_fix():
+    text = DEPLOY.read_text()
+    assert 'check "$CALLER_USER still cannot write the drop directory' in text
+
+
+def test_analysis_units_have_readwrite_not_readonly_on_drop():
+    """ReadOnlyPaths on the drop dir silently defeats delete-on-consume
+    under ProtectSystem=strict regardless of DAC/ACL permissions --
+    confirmed live. Must be ReadWritePaths now."""
+    for unit in (INFRA / "omnissa-analysis" / "omnissa-analysis-scan.service",
+                 INFRA / "omnissa-analysis" / "omnissa-analysis-brief.service"):
+        text = unit.read_text()
+        assert "ReadOnlyPaths=" not in text or "/var/lib/omnissa-agent/drop" not in text.split("ReadOnlyPaths=")[1].splitlines()[0]
+        rw_line = text.split("ReadWritePaths=")[1].splitlines()[0]
+        assert "/var/lib/omnissa-agent/drop" in rw_line
+
+
 def test_analysis_units_write_reports_outside_the_private_state_dir():
     """Regression for a real bug (2026-09-30): a reports dir nested under
     --state-dir (a private 0700/0750 identity home) is unreachable by any

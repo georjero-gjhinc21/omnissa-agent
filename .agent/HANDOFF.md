@@ -290,6 +290,118 @@ with no polkit prompt this time, then performs the one-time checkpoint
 reset described above before the first real scheduled run. This session
 still took no root action and did not enable anything.
 
+## 2026-09-30, production acceptance pass: reports-path bug found, recovery tooling built, GO withheld pending live evidence
+
+Operator confirmed `bcf4d83` deployed clean: `SCHEDULED-AGENT ISOLATION:
+PASS`, no polkit prompts, account/label verified, timers still
+disabled. Asked to finish recovery + production acceptance.
+
+- **Found via `sg <group> -c ...`** (works around this session's stale
+  cached groups without a full re-login): `georjero` still could not
+  reach `/var/lib/omnissa-analysis/state/reports/` despite correct
+  permissions on `reports/` itself -- its parent,
+  `/var/lib/omnissa-analysis`, is `750 omnissa-analysis:omnissa-analysis`,
+  which blocks traversal for everyone else regardless of what's
+  underneath. Fixed by moving reports to
+  `/var/lib/omnissa-agent/reports` (sibling of `drop/`, under the
+  already-world-traversable `/var/lib/omnissa-agent/`). `cli.py
+  classify` gained `--reports-dir`; both analysis units and
+  `deploy-root.sh` updated to match, plus a validated positive check
+  (`georjero CAN reach the shared reports directory`) added to the
+  script's own output.
+- **Built `reconcile`/`requeue`** for the targeted (not blanket)
+  backlog recovery the operator required: `reconcile` (read-only)
+  diffs `gmail_ingested_ids` against `seen_ids` and reports exactly
+  which ids were fetched-but-never-classified (ids only, no content);
+  `requeue` backs up the checkpoint (timestamped, 600) then removes
+  only the named ids, so the next `ingest` re-fetches exactly them.
+  Full recovery command sequence (reconcile -> requeue -> re-ingest
+  with higher limits -> re-classify -> reconcile again) written up in
+  `docs/operations-record.md` §5.
+- `pytest tests/ -q` -> **143/143 green**. `infra/omniroute` suite ->
+  23/23. Pushed as `f26188e`.
+- **GO withheld.** Recovering the actual backlog, running the two live
+  systemd chains (scan and brief), and the omnissa-analysis boundary
+  checks all require root/`sudo -u`, which this session does not have.
+  Gave the operator the exact command sequence for all of it (recovery,
+  both live chains including the "repeat an empty-mail scan, confirm
+  data survives" merge-fix proof, and the non-mutating omnissa-analysis
+  boundary checks) and asked them to run it and share output. Also
+  flagged explicitly: `/opt/omnissa-agent` needs a fresh
+  `deploy-root.sh` re-run before any of this, since a `git push` alone
+  never updates the installed copy.
+
+Next action: operator re-runs `deploy-root.sh` once more (picks up the
+reports-dir fix + recovery tooling), then runs the recovery + both live
+chain tests + boundary checks from the command sequence given, and
+reports the output back for the actual GO/NO-GO call.
+
+## 2026-09-30, read-only audit pass (operator explicitly blocked further recovery/ingestion until this landed)
+
+Operator ran several commands against the OLD `/opt` build (deploy of
+`f26188e` had refused due to an uncommitted `.agent/HANDOFF.md` diff --
+my own doc edit, not code) -- so `reconcile`/`--reports-dir` weren't
+available yet, and two manual `ingest` calls plus a real `omnissa-ingest-scan`
+→ `omnissa-analysis-scan` and `-brief` → `-brief` systemd chain actually
+ran (both completed, exit 0, OnSuccess chaining confirmed live in the
+journal). Asked for a read-only recovery plan and an audit of
+reconcile/requeue and locking -- explicitly: do not requeue yet, do not
+run more ingestion.
+
+Read-only findings:
+- Both 20:18 analysis runs completed successfully (`Deactivated
+  successfully`); scan classified 5 real findings, brief showed none
+  (fully deduped against what scan just processed).
+- **Journal contains real subject lines**, not just status fields --
+  `georjero`'s `adm` group access to journalctl is more sensitive than
+  previously characterized (only `ingest`'s own stdout was verified
+  secret-free; `classify`'s brief text, which does include subject
+  lines, is also journal-logged). Noted, not changed this pass --
+  flagging precisely, not silently expanding scope.
+- **Real bug, confirmed via the journal**: `WARNING: ... could not
+  remove .../latest-brief.json: Read-only file system` -- delete-on-
+  consume (added two commits ago) silently failed under the deployed
+  `ReadOnlyPaths=` + group-mode combination, so the drop file was never
+  actually removed; `duplicates_skipped=83` and climbing was live
+  evidence of the resulting unbounded growth/reprocessing.
+- **Real bug, found while fixing the above**: `cli.py` never called
+  `lock.py` after the ingest/classify split -- scan and brief share one
+  checkpoint per identity with zero protection against a concurrent
+  run. Adding a lock to `_ingest` was correct (nothing protected it
+  before). Adding one to `_classify` was NOT -- `pipeline.run_pilot`
+  (which `classify` calls) already held its own lock on the same file
+  since before the split; a second lock self-blocked via `flock`'s
+  per-open-file-description semantics. Worse: found that a lock-skip
+  inside `run_pilot` wasn't distinguished from a real success by
+  `classify`'s delete-on-consume check, meaning a lock-skipped run
+  would have deleted real, never-processed input -- the same class of
+  data loss as the original incident, in a new place. Fixed: no second
+  lock in `classify`; `_pipeline_from_ingest_result` now detects
+  `run_pilot`'s lock-skip explicitly and returns a distinct `LOCKED`
+  (exit 7) that `classify` checks before ever unlinking its input.
+- `reconcile`'s design was verified against the actual deployed
+  permission model: it needs to read BOTH checkpoints, and
+  `omnissa-ingest`/`omnissa-analysis` are deliberately unable to read
+  each other's private state -- so `reconcile` (and `requeue
+  --verify-unclassified-against`) must run as root, not `sudo -u
+  <identity>` as I'd previously (incorrectly) instructed. Documentation
+  fixed. `requeue` gained `--verify-unclassified-against` so it refuses
+  (rather than trusting blindly) to requeue an id that turns out to
+  already be classified.
+- Fixed the drop-directory write bug precisely: a per-user ACL
+  (`setfacl -m u:omnissa-analysis:rwx`) rather than a group-mode change,
+  since `georjero` shares the same reader group and must stay
+  read-only -- confirmed by a new deploy-time validation check.
+- `pytest tests/ -q` → **151/151 green**, `infra/omniroute` suite →
+  23/23. All fixes are repo-only; nothing privileged was run or
+  modified this pass, no timers touched.
+
+Next action: operator's sequenced runbook is in the chat reply --
+backup → redeploy (this pass's commit) → reconcile (as root) →
+targeted requeue only if genuinely needed → one real ingest/classify
+chain → reconcile again (expect pending=0) → daily brief chain →
+health check. Timers still not enabled.
+
 ---
 
 - Status: scaffolded 2026-09-29, Milestone 1 in progress
