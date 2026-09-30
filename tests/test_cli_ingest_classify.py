@@ -232,6 +232,32 @@ def test_classify_report_group_readable_flag_controls_file_mode(tmp_path):
     assert (group_report.stat().st_mode & 0o777) == 0o640
 
 
+def test_classify_reports_dir_override_writes_outside_state_dir(tmp_path):
+    """Regression for a real bug (2026-09-30): the default reports path
+    nested under --state-dir was unreachable by a reader group when
+    --state-dir itself is a private identity home (0700/0750) --
+    permissions on the ancestor directory always win over the child's
+    own permissions. --reports-dir must write to a fully separate path.
+    """
+    drop = tmp_path / "drop.json"
+    result = gmail_ingest.IngestionResult(status=gmail_ingest.IngestStatus.OK, account="x", label_id="L", label_name="L")
+    drop.write_text(json.dumps(result.to_json_dict()))
+
+    separate_reports_dir = tmp_path / "shared-reports"
+    rc = cli.main(
+        [
+            "classify", "--kind", "scan", "--ingest-result", str(drop),
+            "--state-dir", str(tmp_path / "private-state"),
+            "--reports-dir", str(separate_reports_dir),
+        ]
+    )
+    assert rc == 0
+    reports = list(separate_reports_dir.glob("*-scan.md"))
+    assert len(reports) == 1
+    # nothing was written under the private state dir's own reports/ subpath
+    assert not (tmp_path / "private-state" / "reports").exists()
+
+
 def test_classify_reports_partial_and_surfaces_it_in_the_brief_text(tmp_path):
     drop = tmp_path / "drop.json"
     result = gmail_ingest.IngestionResult(

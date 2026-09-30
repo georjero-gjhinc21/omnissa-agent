@@ -18,6 +18,7 @@ ExecStart=/opt/omnissa-agent/venv/bin/python3 -m omnissa_agent.cli classify \
   --ingest-result /var/lib/omnissa-agent/drop/latest-scan.json \
   --max-age-s 1800 \
   --state-dir /var/lib/omnissa-analysis/state \
+  --reports-dir /var/lib/omnissa-agent/reports \
   --report-group-readable
 TimeoutStartSec=180
 
@@ -36,7 +37,7 @@ RestrictNamespaces=yes
 LockPersonality=yes
 MemoryDenyWriteExecute=yes
 CapabilityBoundingSet=
-ReadWritePaths=/var/lib/omnissa-analysis
+ReadWritePaths=/var/lib/omnissa-analysis /var/lib/omnissa-agent/reports
 ReadOnlyPaths=/var/lib/omnissa-agent/drop
 # Real content only ever needs to reach the local OmniRoute gateway
 # (combo-private/Ollama by default). Widening to combo-continuous is a

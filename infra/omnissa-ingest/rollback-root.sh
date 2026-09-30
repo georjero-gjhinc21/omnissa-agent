@@ -20,6 +20,7 @@ ING_HOME="/var/lib/omnissa-ingest"
 ANA_USER="omnissa-analysis"
 ANA_HOME="/var/lib/omnissa-analysis"
 DROP_DIR="/var/lib/omnissa-agent/drop"
+REPORTS_DIR="/var/lib/omnissa-agent/reports"
 READ_GROUP="omnissa-readers"
 REPORTS_READ_GROUP="omnissa-reports-readers"
 CALLER_USER="georjero"
@@ -55,9 +56,9 @@ mkdir -p "$CALLER_STATE_DIR"
   cp "$ING_HOME/state/checkpoint.json" "$CALLER_STATE_DIR/checkpoint.from-ingest-identity.json"
 [[ -f "$ANA_HOME/state/checkpoint.json" ]] && \
   cp "$ANA_HOME/state/checkpoint.json" "$CALLER_STATE_DIR/checkpoint.from-analysis-identity.json"
-if [[ -d "$ANA_HOME/state/reports" ]]; then
+if [[ -d "$REPORTS_DIR" ]] && [[ -n "$(ls -A "$REPORTS_DIR" 2>/dev/null)" ]]; then
   mkdir -p "$CALLER_STATE_DIR/reports-from-analysis-identity"
-  cp -r "$ANA_HOME/state/reports/." "$CALLER_STATE_DIR/reports-from-analysis-identity/" 2>/dev/null || true
+  cp -r "$REPORTS_DIR/." "$CALLER_STATE_DIR/reports-from-analysis-identity/" 2>/dev/null || true
 fi
 # Do NOT delete the drop directory's only copy sight-unseen: a drop file
 # that ingest wrote but analysis hasn't yet consumed (e.g. rollback runs
@@ -72,9 +73,10 @@ if [[ -d "$DROP_DIR" ]] && [[ -n "$(ls -A "$DROP_DIR" 2>/dev/null)" ]]; then
 fi
 chown -R georjero:georjero "$CALLER_STATE_DIR" 2>/dev/null || true
 
-echo "== remove the deployed code copy and drop directory (contents already preserved above; contain no secrets either way) =="
+echo "== remove the deployed code copy, drop directory, and reports directory (contents already preserved above; contain no secrets either way) =="
 rm -rf /opt/omnissa-agent
 rm -rf "$DROP_DIR"
+rm -rf "$REPORTS_DIR"
 
 echo "== remove the service identities =="
 userdel "$ING_USER" 2>/dev/null || true

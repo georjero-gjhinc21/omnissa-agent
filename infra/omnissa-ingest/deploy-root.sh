@@ -84,6 +84,7 @@ ING_HOME="/var/lib/omnissa-ingest"
 ANA_USER="omnissa-analysis"
 ANA_HOME="/var/lib/omnissa-analysis"
 DROP_DIR="/var/lib/omnissa-agent/drop"
+REPORTS_DIR="/var/lib/omnissa-agent/reports"
 READ_GROUP="omnissa-readers"
 REPORTS_READ_GROUP="omnissa-reports-readers"
 CALLER_USER="georjero"
@@ -125,9 +126,16 @@ echo "== 2. private credential storage (0700 dir / 0600 files, no group access) 
 install -d -o "$ING_USER" -g "$ING_USER" -m 0700 "$ING_HOME/google"
 install -d -o "$ING_USER" -g "$ING_USER" -m 0700 "$ING_HOME/state"
 install -d -o "$ANA_USER" -g "$ANA_USER" -m 0700 "$ANA_HOME/state"
-# reports subdir pre-created here (NOT left to cli.py's own mkdir) so it
-# gets the shared reader group + setgid from the start
-install -d -o "$ANA_USER" -g "$REPORTS_READ_GROUP" -m 2750 "$ANA_HOME/state/reports"
+# Reports live OUTSIDE the private identity home, as a sibling of the
+# drop directory under the world-traversable /var/lib/omnissa-agent --
+# NOT nested under $ANA_HOME (0750, omnissa-analysis-only). Confirmed
+# live (2026-09-30): a 0700/0750 ANCESTOR directory blocks traversal to
+# anything beneath it regardless of that thing's own permissions, so a
+# "reports/" nested inside the private home was unreachable by
+# $REPORTS_READ_GROUP no matter how it was chmod'd. This is why
+# cli.py classify takes an explicit --reports-dir instead of always
+# deriving it from --state-dir.
+install -d -o "$ANA_USER" -g "$REPORTS_READ_GROUP" -m 2750 "$REPORTS_DIR"
 
 move_credential() { # <src> <dst>
   local src="$1" dst="$2"
@@ -207,6 +215,7 @@ check "$CALLER_USER cannot read token.json" yes test -r "$ING_HOME/google/token.
 check "$CALLER_USER cannot read client_secret.json" yes test -r "$ING_HOME/google/client_secret.json"
 check "$CALLER_USER cannot write the deployed ingestion code" yes test -w "$OPT_DIR/src/omnissa_agent/cli.py"
 check "$CALLER_USER cannot read omnissa-analysis's state dir" yes test -r "$ANA_HOME/state"
+check "$CALLER_USER CAN reach the shared reports directory" no test -x "$REPORTS_DIR"
 
 echo "-- privileged-unit access: NON-MUTATING policy check -- never actually starts/stops/enables anything --"
 # A deploy-time check must never risk performing the very action it is

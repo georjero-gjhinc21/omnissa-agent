@@ -110,14 +110,27 @@ def _messages_from_json(raw: str) -> list[GmailMessage]:
     ]
 
 
-def _write_report(kind: str, report, *, state_base=None, file_mode: int = 0o600) -> Path:
+def _write_report(kind: str, report, *, state_base=None, file_mode: int = 0o600, reports_dir=None) -> Path:
     """``file_mode`` defaults to owner-only (0600) for manual/single-process
     use. The privilege-separated deployment passes 0640 so a dedicated
     reader group (never ``georjero`` writing, only reading) can see the
     output -- the directory's own setgid bit (set by the deploy script,
     not here) makes new files inherit that group automatically.
+
+    ``reports_dir``, when given, overrides the default ``<state>/reports``
+    location entirely. This matters for the privilege-separated
+    deployment: a reports directory nested under a 0700 identity home
+    (e.g. ``/var/lib/omnissa-analysis/state/reports``) is unreachable by
+    any reader group no matter its OWN permissions, because every
+    ancestor directory needs traversal (+x) rights too -- confirmed live
+    (2026-09-30): ``/var/lib/omnissa-analysis`` itself is
+    ``750 omnissa-analysis:omnissa-analysis``, which blocks everyone
+    else regardless of what ``reports/`` underneath it allows. The fix
+    is a reports path whose entire ancestor chain is already traversable
+    -- e.g. a sibling of the drop directory under the world-traversable
+    ``/var/lib/omnissa-agent/``, not nested inside a private home.
     """
-    reports_dir = state_mod.state_dir(state_base) / "reports"
+    reports_dir = Path(reports_dir) if reports_dir else (state_mod.state_dir(state_base) / "reports")
     reports_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
     ts = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
     path = reports_dir / f"{ts}-{kind}.md"
@@ -250,6 +263,77 @@ def _list_labels(args) -> int:
     return 0
 
 
+def _reconcile(args) -> int:
+    """READ-ONLY recovery diagnostic: compare the ingestion checkpoint's
+    ``gmail_ingested_ids`` against the analysis checkpoint's ``seen_ids``
+    and report exactly which ids were fetched but never classified.
+    Prints ids only (never subjects/snippets/content) -- ids are opaque
+    Gmail identifiers, not message content. Makes NO changes to either
+    checkpoint; see ``requeue`` for the actual recovery action.
+    """
+    ingest_state = state_mod.load_state(Path(args.ingest_state_dir) if args.ingest_state_dir else None)
+    analysis_state = state_mod.load_state(Path(args.analysis_state_dir) if args.analysis_state_dir else None)
+
+    fetched = set(ingest_state.get("gmail_ingested_ids", []))
+    classified = set(analysis_state.get("seen_ids", []))
+    pending = fetched - classified
+
+    print(f"fetched={len(fetched)} classified={len(classified)} pending={len(pending)}")
+    if pending:
+        print("pending ids (fetched but never classified -- candidates for `requeue`):")
+        for mid in sorted(pending):
+            print(f"  {mid}")
+    return 0
+
+
+def _requeue(args) -> int:
+    """Targeted recovery: remove specific ids from a checkpoint's id list
+    (default key ``gmail_ingested_ids``) so the next `ingest` run
+    re-fetches exactly those messages from Gmail -- NOT a blanket
+    checkpoint wipe. Backs up the checkpoint file (timestamped, full
+    copy) to ``--backup-dir`` BEFORE making any change. Nothing is
+    fetched here; this only edits local bookkeeping.
+    """
+    state_base = Path(args.state_dir) if args.state_dir else None
+    checkpoint_path = state_mod.state_dir(state_base) / "checkpoint.json"
+    if not checkpoint_path.exists():
+        print(f"ERROR: no checkpoint at {checkpoint_path}", file=sys.stderr)
+        return UNEXPECTED_ERROR
+
+    if args.ids_file:
+        ids_to_remove = [
+            line.strip() for line in Path(args.ids_file).read_text().splitlines() if line.strip()
+        ]
+    else:
+        ids_to_remove = [i.strip() for i in args.ids.split(",") if i.strip()]
+    if not ids_to_remove:
+        print("ERROR: no ids given (--ids or --ids-file)", file=sys.stderr)
+        return UNEXPECTED_ERROR
+
+    backup_dir = Path(args.backup_dir)
+    backup_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+    ts = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
+    backup_path = backup_dir / f"checkpoint-{ts}.json.bak"
+    backup_path.write_text(checkpoint_path.read_text())
+    backup_path.chmod(0o600)
+    print(f"backed up {checkpoint_path} to {backup_path} before making any change")
+
+    st = state_mod.load_state(state_base)
+    key = args.key
+    before = list(st.get(key, []))
+    ids_to_remove_set = set(ids_to_remove)
+    after = [i for i in before if i not in ids_to_remove_set]
+    removed = len(before) - len(after)
+    st[key] = after
+    state_mod.save_state(st, state_base)
+
+    print(f"key={key!r}: removed {removed} of {len(ids_to_remove)} requested id(s), {len(after)} remain")
+    if removed < len(ids_to_remove):
+        missing = ids_to_remove_set - set(before)
+        print(f"NOTE: {len(missing)} requested id(s) were not present in {key!r} (already absent): {sorted(missing)}", file=sys.stderr)
+    return 0
+
+
 def _draft(args) -> int:
     """The ONLY path that ever produces a real (non-synthetic) Agent B
     draft. A human types the summary and picks the confidence themselves
@@ -321,7 +405,8 @@ def _pipeline_from_ingest_result(ingest_result, *, kind: str, args) -> int:
         state_base=state_base,
     )
     file_mode = 0o640 if getattr(args, "report_group_readable", False) else 0o600
-    path = _write_report(kind, report, state_base=state_base, file_mode=file_mode)
+    reports_dir = getattr(args, "reports_dir", None)
+    path = _write_report(kind, report, state_base=state_base, file_mode=file_mode, reports_dir=reports_dir)
     print(f"wrote {path}")
     print(
         f"account={ingest_result.account} label={ingest_result.label_name} "
@@ -558,6 +643,23 @@ def main(argv: list[str] | None = None) -> int:
     labels_p.add_argument("--client-secret", required=True)
     labels_p.add_argument("--token", required=True)
 
+    reconcile_p = sub.add_parser(
+        "reconcile",
+        help="READ-ONLY: compare ingest vs analysis checkpoints, report fetched/classified/pending ids",
+    )
+    reconcile_p.add_argument("--ingest-state-dir", default=None)
+    reconcile_p.add_argument("--analysis-state-dir", default=None)
+
+    requeue_p = sub.add_parser(
+        "requeue",
+        help="Targeted recovery: remove specific ids from a checkpoint so the next ingest re-fetches them",
+    )
+    requeue_p.add_argument("--state-dir", default=None, help="the checkpoint's own state dir (e.g. omnissa-ingest's)")
+    requeue_p.add_argument("--key", default="gmail_ingested_ids", help="checkpoint list key to edit")
+    requeue_p.add_argument("--ids", default="", help="comma-separated ids to remove")
+    requeue_p.add_argument("--ids-file", default=None, help="path to a file with one id per line")
+    requeue_p.add_argument("--backup-dir", required=True, help="where to write a timestamped checkpoint backup first")
+
     run_p = sub.add_parser("run", help="THE LIVE PATH: real Gmail ingestion -> pipeline")
     run_p.add_argument("--kind", choices=["scan", "brief"], required=True)
     run_p.add_argument(
@@ -617,6 +719,16 @@ def main(argv: list[str] | None = None) -> int:
         "deployment, where a dedicated reader group (not the analysis identity's own "
         "group) is meant to see the output. Off by default (owner-only).",
     )
+    classify_p.add_argument(
+        "--reports-dir",
+        default=None,
+        help="write reports here instead of <state-dir>/reports -- required for the "
+        "privilege-separated deployment: a reports dir nested under a private identity "
+        "home is unreachable by any reader group regardless of its own permissions, "
+        "since every ancestor directory needs its own traversal rights too. Point this "
+        "at a path whose whole ancestor chain is already shared/traversable instead "
+        "(e.g. a sibling of the drop directory).",
+    )
 
     args = parser.parse_args(argv)
     if args.command == "scan":
@@ -627,6 +739,10 @@ def main(argv: list[str] | None = None) -> int:
         return _authorize(args)
     if args.command == "list-labels":
         return _list_labels(args)
+    if args.command == "reconcile":
+        return _reconcile(args)
+    if args.command == "requeue":
+        return _requeue(args)
     if args.command == "draft":
         return _draft(args)
     if args.command == "ingest":

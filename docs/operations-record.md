@@ -23,13 +23,27 @@ invoked). See `tests/test_deploy_script_safety.py`'s
 
 As a direct consequence, an earlier ingest run's 50 real messages were
 overwritten by a later empty drop before analysis ever consumed them —
-marked "ingested" (so never re-fetched) but never classified. See §3's
-merge-fix. **Recovery needed on next deployment**: after redeploying
-this fix, delete `/var/lib/omnissa-ingest/state/checkpoint.json` once
-(root; contains only message ids, no secrets) so the next ingest run
-re-fetches everything currently under the label fresh — nothing was
-altered on the Gmail side, so this is a full, safe recovery, not a
-workaround.
+marked "ingested" (so never re-fetched) but never classified. Fixed
+going forward by the merge behavior below; **Recovery**: targeted, not
+a blanket checkpoint wipe — see §5 for the `reconcile`/`requeue`
+commands that identify exactly which ids were fetched-but-never-
+classified and requeue only those, backing up the checkpoint first.
+
+**2026-09-30 — a reports directory nested under a private identity home
+is unreachable by its reader group, no matter its own permissions.**
+`omnissa-analysis`'s reports were originally written to
+`/var/lib/omnissa-analysis/state/reports/` (mode 2750, group
+`omnissa-reports-readers`). Confirmed live: `georjero` still got
+Permission denied reaching it, because `/var/lib/omnissa-analysis`
+itself is `750 omnissa-analysis:omnissa-analysis` — every ancestor
+directory needs its own traversal (+x) rights, and permissions on a
+child never override a blocking parent. Fixed by moving reports to
+`/var/lib/omnissa-agent/reports/`, a sibling of the drop directory under
+the already-world-traversable `/var/lib/omnissa-agent/` (`755
+root:root`) — the same pattern that already worked correctly for
+`drop/`. `cli.py classify` gained an explicit `--reports-dir` so the
+output path is never implicitly derived from (and therefore trapped
+inside) `--state-dir` again.
 
 ## 1. Architecture — who runs what
 
@@ -64,7 +78,7 @@ omnissa-ingest: verify account+label, fetch metadata, dedup
 omnissa-analysis: classify (Agent A) -> draft candidates (Agent B, local text only)
    |  writes brief/report + drafts (DRAFT ONLY -- NOT SENT)
    v
-/var/lib/omnissa-analysis/state/reports/*.md   (mode 2750/0640, group omnissa-reports-readers)
+/var/lib/omnissa-agent/reports/*.md   (mode 2750/0640, group omnissa-reports-readers)
    |  read-only
    v
 georjero (interactive review, via this project's terminals) -- NOT automated beyond reading
@@ -133,8 +147,8 @@ systemctl status omnissa-analysis-scan.service
 journalctl -u omnissa-ingest-scan.service -n 20    # georjero CAN read these (adm group) --
 journalctl -u omnissa-analysis-scan.service -n 20  # safe by design, stdout never has secrets
 ls -la /var/lib/omnissa-agent/drop/                # latest sanitized fetch (georjero-readable)
-ls -la /var/lib/omnissa-analysis/state/reports/    # latest briefs/drafts (georjero-readable)
-cat /var/lib/omnissa-analysis/state/reports/<latest>.md
+ls -la /var/lib/omnissa-agent/reports/    # latest briefs/drafts (georjero-readable)
+cat /var/lib/omnissa-agent/reports/<latest>.md
 ```
 
 ## 4. Exit codes (both `ingest` and `classify`)
@@ -173,9 +187,55 @@ because it isn't determined what channel would be appropriate.
   (label listing is never date-filtered) — verified by
   `test_older_message_newly_labeled_is_still_picked_up`.
 
+### Targeted backlog recovery (`reconcile` + `requeue`)
+
+Built for the incident in §0: never wipe a whole checkpoint to recover
+from a gap. Both commands are read-only or self-backing-up; neither
+touches Gmail.
+
+```sh
+# 1. READ-ONLY: which ids were fetched but never classified?
+sudo -u omnissa-ingest /opt/omnissa-agent/venv/bin/python3 -m omnissa_agent.cli reconcile \
+  --ingest-state-dir /var/lib/omnissa-ingest/state \
+  --analysis-state-dir /var/lib/omnissa-analysis/state
+# -> fetched=N classified=M pending=K, plus the K pending ids (ids only, no content)
+
+# 2. Requeue exactly those ids (backs up the checkpoint first, automatically)
+sudo -u omnissa-ingest /opt/omnissa-agent/venv/bin/python3 -m omnissa_agent.cli requeue \
+  --state-dir /var/lib/omnissa-ingest/state \
+  --ids <comma-separated pending ids from step 1> \
+  --backup-dir /var/lib/omnissa-ingest/recovery-backups
+
+# 3. Re-fetch them for real (higher limits than the default hourly run,
+#    to guarantee one pass covers the whole backlog even if new mail
+#    has since pushed them further back in Gmail's listing order)
+sudo -u omnissa-ingest /opt/omnissa-agent/venv/bin/python3 -m omnissa_agent.cli ingest \
+  --client-secret /var/lib/omnissa-ingest/google/client_secret.json \
+  --token /var/lib/omnissa-ingest/google/token.json \
+  --out /var/lib/omnissa-agent/drop/latest-scan.json \
+  --max-messages 200 --max-pages 10 \
+  --state-dir /var/lib/omnissa-ingest/state
+
+# 4. Classify the recovered batch
+sudo -u omnissa-analysis /opt/omnissa-agent/venv/bin/python3 -m omnissa_agent.cli classify \
+  --kind scan --ingest-result /var/lib/omnissa-agent/drop/latest-scan.json \
+  --state-dir /var/lib/omnissa-analysis/state \
+  --reports-dir /var/lib/omnissa-agent/reports --report-group-readable
+
+# 5. Confirm: pending should now be 0
+sudo -u omnissa-ingest /opt/omnissa-agent/venv/bin/python3 -m omnissa_agent.cli reconcile \
+  --ingest-state-dir /var/lib/omnissa-ingest/state \
+  --analysis-state-dir /var/lib/omnissa-analysis/state
+```
+
+A blanket checkpoint delete is a last resort only, and only if a
+targeted replay is impossible (e.g. the checkpoint file itself is
+corrupted beyond parsing) — in that case document exactly why targeted
+recovery couldn't be used before falling back to it.
+
 ## 6. Data retention
 
-- Reports/drafts accumulate under `/var/lib/omnissa-analysis/state/reports/`
+- Reports/drafts accumulate under `/var/lib/omnissa-agent/reports/`
   with no automatic pruning. This is metadata (subjects/snippets), not
   full email bodies, but still grows unbounded over time. **Not yet
   addressed** — a `tmpfiles.d` rule or a retention flag in `cli.py`
@@ -256,7 +316,7 @@ proceeding.
    sudo systemctl start omnissa-ingest-scan.service
    sudo systemctl status omnissa-ingest-scan.service omnissa-analysis-scan.service
    sudo journalctl -u omnissa-ingest-scan.service -u omnissa-analysis-scan.service -n 40
-   cat /var/lib/omnissa-analysis/state/reports/<latest>.md
+   cat /var/lib/omnissa-agent/reports/<latest>.md
    ```
    **Gate: ingest exits 0 (or 6/PARTIAL with a sane reason — in which
    case analysis correctly does NOT run this cycle, by design), analysis

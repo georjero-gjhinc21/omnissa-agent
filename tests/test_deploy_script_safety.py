@@ -219,6 +219,35 @@ def test_units_reference_the_privilege_separated_cli_commands():
         assert "--max-age-s" in u.read_text(), "must refuse stale drop data, not just old-but-present"
 
 
+def test_analysis_units_write_reports_outside_the_private_state_dir():
+    """Regression for a real bug (2026-09-30): a reports dir nested under
+    --state-dir (a private 0700/0750 identity home) is unreachable by any
+    reader group no matter its own permissions -- ancestor directory
+    permissions always win. Reports must go to an explicit --reports-dir
+    outside that home."""
+    for u in ANALYSIS_UNITS:
+        text = u.read_text()
+        assert "--reports-dir /var/lib/omnissa-agent/reports" in text
+        assert "--reports-dir /var/lib/omnissa-analysis" not in text
+        # the write permission for that path must also be granted under ProtectSystem=strict
+        assert "ReadWritePaths=" in text and "/var/lib/omnissa-agent/reports" in text.split("ReadWritePaths=")[1].splitlines()[0]
+
+
+def test_deploy_creates_reports_dir_under_the_shared_traversable_path_not_the_private_home():
+    text = DEPLOY.read_text()
+    assert 'REPORTS_DIR="/var/lib/omnissa-agent/reports"' in text
+    assert '"$ANA_HOME/state/reports"' not in text, "reports must not be nested under the private identity home again"
+
+
+def test_reconcile_and_requeue_commands_exist_and_are_wired():
+    """Static check that the recovery tooling the operator relies on is
+    actually present, not just documented."""
+    cli_src = (Path(__file__).resolve().parent.parent / "src" / "omnissa_agent" / "cli.py").read_text()
+    assert '"reconcile"' in cli_src and "_reconcile(args)" in cli_src
+    assert '"requeue"' in cli_src and "_requeue(args)" in cli_src
+    assert "backup_path.write_text" in cli_src, "requeue must back up before changing the checkpoint"
+
+
 MUTATING_SYSTEMCTL_VERBS = ("start", "stop", "restart", "reload", "enable", "disable", "mask", "kill")
 
 
