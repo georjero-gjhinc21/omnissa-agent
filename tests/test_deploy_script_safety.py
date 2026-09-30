@@ -170,6 +170,16 @@ def test_ingest_timers_are_persistent_for_missed_run_catchup():
             assert "Persistent=true" in unit.read_text()
 
 
+def test_no_success_exit_status_override_so_partial_exit_stays_a_failure():
+    """PARTIAL (exit 6) must remain 'failed' in systemd's own accounting
+    so OnSuccess= correctly never chains a partial ingest into analysis.
+    Verified live on the deployed units too (2026-09-29): no
+    SuccessExitStatus= present, default semantics apply."""
+    for unit in (INFRA / "omnissa-ingest" / "omnissa-ingest-scan.service",
+                 INFRA / "omnissa-ingest" / "omnissa-ingest-brief.service"):
+        assert "SuccessExitStatus" not in unit.read_text()
+
+
 def test_ingest_services_chain_to_analysis_via_onsuccess_not_a_fixed_timer():
     """The real fix for 'a brief must not read a partially-written drop
     file / failed ingestion must not yield a success-looking brief':
@@ -207,6 +217,72 @@ def test_units_reference_the_privilege_separated_cli_commands():
         assert "omnissa_agent.cli classify" in u.read_text()
         assert "--report-group-readable" in u.read_text()
         assert "--max-age-s" in u.read_text(), "must refuse stale drop data, not just old-but-present"
+
+
+MUTATING_SYSTEMCTL_VERBS = ("start", "stop", "restart", "reload", "enable", "disable", "mask", "kill")
+
+
+def _executable_lines(script_text: str) -> list[str]:
+    """Lines that actually run when the script executes -- excludes the
+    final `cat <<EOM ... EOM` heredoc (printed operator instructions,
+    never invoked) and any line that is itself just an echo/comment."""
+    lines = script_text.splitlines()
+    out = []
+    in_heredoc = False
+    for line in lines:
+        stripped = line.strip()
+        if stripped.startswith("cat <<") or stripped.startswith("cat <<'EOM'"):
+            in_heredoc = True
+            continue
+        if in_heredoc:
+            if stripped == "EOM":
+                in_heredoc = False
+            continue
+        if stripped.startswith("#") or stripped.startswith("echo "):
+            continue
+        out.append(line)
+    return out
+
+
+def test_no_negative_probe_ever_invokes_a_mutating_systemctl_verb():
+    """Regression for a real incident: a 'negative permission check' that
+    actually called `systemctl start` triggered a live polkit prompt,
+    which the operator answered, which actually started both services.
+    A deploy-time authorization CHECK must never be able to perform the
+    action it is checking -- this scans every line that actually
+    executes (not printed instructions) for a mutating systemctl verb.
+    """
+    import re
+
+    for line in _executable_lines(DEPLOY.read_text()):
+        if "systemctl" not in line or "daemon-reload" in line:
+            continue  # daemon-reload reloads unit *definitions*, doesn't start/stop any unit
+        for verb in MUTATING_SYSTEMCTL_VERBS:
+            if re.search(rf"systemctl\s+(-u\s+\S+\s+)?{verb}\b", line):
+                assert False, (
+                    f"deploy-root.sh: executable line invokes 'systemctl {verb}' -- "
+                    f"a check must never perform the action it tests:\n  {line.strip()}"
+                )
+    # rollback-root.sh IS allowed to disable/stop -- that's its whole job, not a "check"
+
+
+def test_check_helper_negative_probes_are_all_read_only_commands():
+    """Every use of the check() helper (the negative-probe mechanism) in
+    deploy-root.sh must invoke a read-only test, never a state-changing
+    command -- enumerate them explicitly rather than trust a keyword scan
+    alone."""
+    text = DEPLOY.read_text()
+    check_calls = [
+        line.strip() for line in text.splitlines() if line.strip().startswith("check ")
+    ]
+    assert check_calls, "expected at least one check() call in deploy-root.sh"
+    allowed_read_only_cmds = ("test ",)
+    for call in check_calls:
+        # check "<label>" <yes|no> <command...> -- the command starts after
+        # the second quoted/bare arg; assert it begins with an allowed verb
+        assert any(cmd in call for cmd in allowed_read_only_cmds), (
+            f"check() call does not use a known read-only command: {call}"
+        )
 
 
 def test_shell_syntax_is_valid():

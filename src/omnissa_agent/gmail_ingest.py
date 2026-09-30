@@ -129,6 +129,40 @@ class IngestionResult:
         )
 
 
+def merge_pending(old: "IngestionResult", new: "IngestionResult") -> "IngestionResult":
+    """Combine an unconsumed prior drop with a fresh ingest run instead of
+    overwriting it.
+
+    Confirmed live (2026-09-29) that overwriting was a real bug, not a
+    theoretical one: an ingest run fetched 50 real messages and wrote
+    them to the drop file; the NEXT ingest run found 0 new messages
+    (correctly -- they were already in ``gmail_ingested_ids``) and
+    overwrote the drop file with an empty one before analysis ever read
+    it. Those 50 messages are marked ingested (so will never be
+    re-fetched) but were never classified -- permanently lost from the
+    pipeline, though never altered on the Gmail side.
+
+    Safe to concatenate message lists without a further dedup pass: ids
+    across two ingest runs are guaranteed disjoint by construction,
+    since ``run_ingestion`` never re-fetches an id already recorded in
+    ``gmail_ingested_ids`` from a prior run.
+    """
+    if old.status != IngestStatus.OK:
+        return new  # nothing meaningful to merge from a failed/refused prior snapshot
+    return IngestionResult(
+        status=new.status,
+        account=new.account,
+        label_id=new.label_id,
+        label_name=new.label_name,
+        messages=list(old.messages) + list(new.messages),
+        duplicates_skipped=old.duplicates_skipped + new.duplicates_skipped,
+        rejected_stale_label_ids=list(old.rejected_stale_label_ids) + list(new.rejected_stale_label_ids),
+        malformed_ids=list(old.malformed_ids) + list(new.malformed_ids),
+        reason=new.reason,
+        deadline_hit=old.deadline_hit or new.deadline_hit,
+    )
+
+
 def verify_account(client: GmailReadonlyClient) -> str:
     try:
         profile = client.get_profile()

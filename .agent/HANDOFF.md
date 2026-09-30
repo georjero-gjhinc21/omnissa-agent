@@ -221,6 +221,75 @@ standing docker INFO line), then works through
 single-shot trigger of each service, inspect, only then enable timers).
 This session still cannot run any of that -- no sudo password.
 
+## 2026-09-30, incident response: a deploy-time check actually started services; found and fixed a real data-loss bug as a result
+
+Operator ran `deploy-root.sh` at 7075a99. Its two negative checks
+literally called `systemctl start omnissa-ingest-scan.service` /
+`omnissa-analysis-scan.service` as georjero. Because georjero is in
+`sudo` (a polkit admin identity), this triggered a REAL interactive
+auth prompt; the operator reasonably answered it, and both services
+ACTUALLY RAN -- twice, a few seconds apart (ingest's own `OnSuccess=`
+fired analysis once, then the script's own second check triggered
+analysis again directly). Root cause and fix:
+
+- Removed both `systemctl start` invocations entirely. Replaced with a
+  genuinely non-mutating check: `pkaction --verbose --action-id
+  org.freedesktop.systemd1.manage-units` (a read of polkit's shipped
+  policy, confirms `auth_admin` is unconditionally required) plus
+  reading `/usr/share/polkit-1/rules.d/49-ubuntu-admin.rules` (confirms
+  polkit's admin identity is `unix-group:sudo`/`admin`, unmodified by
+  us). `omnissa-analysis` is in neither group, so it structurally has
+  no path here, interactively or not -- no live invocation needed to
+  know that. `georjero`'s ability to interactively authenticate is the
+  SAME pre-existing sudo-group fact already tracked as operator-account
+  risk, not a new scheduled-agent gap; the disclosure text now says so
+  explicitly.
+- New regression tests: `test_no_negative_probe_ever_invokes_a_mutating_systemctl_verb`
+  (scans every line that actually executes -- excludes the printed
+  operator-instructions heredoc -- for start/stop/restart/enable/
+  disable/mask/kill) and `test_check_helper_negative_probes_are_all_read_only_commands`.
+- **Real-world consequence found via read-only incident review**: journal
+  logs show ingest ran 3 times (18:31 -- 50 real messages fetched and
+  written; 18:58 -- 0 new, and the drop file was silently overwritten
+  to empty; 19:44 -- the reported incident, 0 new). Analysis's own log
+  shows its first-ever run (18:58:36) already saw "none this run" --
+  the original 50 messages were fetched, marked ingested (so will never
+  be re-fetched), but were NEVER classified. This is the drop-overwrite
+  defect the operator asked to be investigated, confirmed to have
+  already happened, not hypothetical.
+- Fixed at the root: `gmail_ingest.merge_pending()` -- `ingest` now
+  merges with, never overwrites, an unconsumed prior drop file (safe to
+  concatenate without re-dedup, since ids across two ingest runs are
+  disjoint by construction via `gmail_ingested_ids`). `classify` now
+  deletes the drop file ONLY once its data has actually been used (a
+  report was written) -- a refused/unreadable file is left in place.
+  `tests/test_drop_file_merge_and_consume.py` replays the exact
+  incident sequence (ingest 3 msgs -> ingest 0 new -> classify) and
+  asserts nothing is lost; also covers delete-on-consume vs
+  preserve-on-refusal.
+- **Recovery still needed, not yet done** (requires root): the 50
+  already-lost messages are gone from the drop file but NOT from Gmail
+  -- delete `/var/lib/omnissa-ingest/state/checkpoint.json` once after
+  redeploying this fix, so the next ingest re-fetches everything
+  currently under the label fresh. Documented in
+  `docs/operations-record.md` §0.
+- Confirmed via read-only checks (no mutation): both timers still
+  disabled, `systemctl list-timers` shows zero active; no stale
+  independent analysis timer files exist; no `SuccessExitStatus=`
+  override anywhere (PARTIAL/exit 6 stays "failed" in systemd's own
+  accounting, so `OnSuccess=` correctly can't chain a partial ingest
+  into analysis); all 6 deployed unit files are byte-identical to the
+  repo's committed versions at the deployed SHA (7075a99 -- will need a
+  re-deploy to pick up today's fixes).
+- `pytest tests/ -q` -> **132/132 green**. `infra/omniroute/tests/test-omniroute.sh`
+  -> 23/23, unaffected.
+
+Next action: operator re-runs `deploy-root.sh` (idempotent) once this
+pass's commit is on `main`, confirms `SCHEDULED-AGENT ISOLATION: PASS`
+with no polkit prompt this time, then performs the one-time checkpoint
+reset described above before the first real scheduled run. This session
+still took no root action and did not enable anything.
+
 ---
 
 - Status: scaffolded 2026-09-29, Milestone 1 in progress

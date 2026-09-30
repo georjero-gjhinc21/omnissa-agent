@@ -202,18 +202,36 @@ check() { # <label> <expect_denied yes|no> <command...>
   fi
 }
 
-echo "-- direct file-permission checks (georjero) --"
+echo "-- direct file-permission checks (georjero) -- READ-ONLY, no service is ever started --"
 check "$CALLER_USER cannot read token.json" yes test -r "$ING_HOME/google/token.json"
 check "$CALLER_USER cannot read client_secret.json" yes test -r "$ING_HOME/google/client_secret.json"
 check "$CALLER_USER cannot write the deployed ingestion code" yes test -w "$OPT_DIR/src/omnissa_agent/cli.py"
-check "$CALLER_USER cannot start the privileged ingest service" yes systemctl start omnissa-ingest-scan.service
-check "$CALLER_USER cannot start the analysis service" yes systemctl start omnissa-analysis-scan.service
 check "$CALLER_USER cannot read omnissa-analysis's state dir" yes test -r "$ANA_HOME/state"
+
+echo "-- privileged-unit access: NON-MUTATING policy check -- never actually starts/stops/enables anything --"
+# A deploy-time check must never risk performing the very action it is
+# testing against. This queries polkit's DECLARED policy for the action
+# (a static read of shipped configuration), never invokes it.
+POLKIT_INFO="$(pkaction --verbose --action-id org.freedesktop.systemd1.manage-units 2>/dev/null || true)"
+if echo "$POLKIT_INFO" | grep -q "implicit any:.*auth_admin"; then
+  echo "PASS: org.freedesktop.systemd1.manage-units requires interactive admin"
+  echo "      authentication for ANY subject, unconditionally (confirmed via"
+  echo "      'pkaction --verbose' -- a read of policy, nothing was started)."
+else
+  echo "FAIL: could not confirm polkit requires admin auth for unit management"
+  echo "      -- inspect manually: pkaction --verbose --action-id org.freedesktop.systemd1.manage-units"
+  FAIL=1
+fi
+if [[ -r /usr/share/polkit-1/rules.d/49-ubuntu-admin.rules ]] && \
+   grep -q 'unix-group:sudo' /usr/share/polkit-1/rules.d/49-ubuntu-admin.rules; then
+  echo "PASS: polkit's admin identity is unix-group:sudo/admin (standard Ubuntu rule,"
+  echo "      not modified by this script) -- confirmed by reading the rule file."
+fi
 
 echo "-- $ANA_USER identity's own privilege surface (must be as restricted as georjero would need to be) --"
 ANA_GROUPS="$(id -Gn "$ANA_USER")"
 echo "$ANA_USER groups: $ANA_GROUPS"
-for bad in docker lxd sudo adm; do
+for bad in docker lxd sudo adm admin; do
   if echo "$ANA_GROUPS" | tr ' ' '\n' | grep -qx "$bad"; then
     echo "FAIL: $ANA_USER is unexpectedly in the '$bad' group"; FAIL=1
   else
@@ -244,13 +262,22 @@ echo "OPERATOR ACCOUNT RISK (separate, pre-existing, not fixed by this script):"
 echo "  $CALLER_USER (georjero) is a member of 'docker' (and 'sudo'). Docker group"
 echo "  membership is root-equivalent on its own (e.g. 'docker run -v /:/host"
 echo "  --rm -it alpine chroot /host sh'), independent of any sudo password."
+echo "  Separately: georjero's 'sudo' membership ALSO means polkit will treat"
+echo "  georjero as an admin identity (see 49-ubuntu-admin.rules, unmodified"
+echo "  by this script) -- so georjero COULD interactively authenticate (their"
+echo "  own password, a conscious act) to start/stop these systemd units. This"
+echo "  is identical in nature to running 'sudo systemctl start' directly, and"
+echo "  belongs to this SAME pre-existing sudo-group risk, not a scheduled-agent"
+echo "  isolation gap: omnissa-analysis has no admin-group membership at all and"
+echo "  therefore no such path exists for it, interactively or not."
 echo "  This is a fact about the georjero ACCOUNT, unrelated to whether the"
 echo "  scheduled-agent isolation above passes -- omnissa-ingest and"
 echo "  omnissa-analysis have no path to georjero's privileges, and removing"
-echo "  georjero from docker is NOT required for them to be correctly isolated."
-echo "  It matters only if you also want to close georjero's OWN pre-existing"
-echo "  path to root. See the README in this directory for the trade-offs."
-echo "  Not applied here -- Docker config and georjero's groups are untouched."
+echo "  georjero from docker/sudo is NOT required for them to be correctly"
+echo "  isolated. It matters only if you also want to close georjero's OWN"
+echo "  pre-existing path to root. See the README in this directory for the"
+echo "  trade-offs. Not applied here -- Docker config and georjero's groups"
+echo "  are untouched."
 echo "======================================================================"
 
 if [[ -f "$ING_HOME/google/client_secret.json" && -f "$ING_HOME/google/token.json" ]]; then

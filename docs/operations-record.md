@@ -5,6 +5,32 @@ schedule, and what it is and isn't allowed to do. Written 2026-09-29.
 If this ever disagrees with the code or the deployed units, the code
 wins — update this file.
 
+## 0. Known incidents
+
+**2026-09-29 — deploy-time check started services for real; a real
+drop-overwrite data loss occurred as a result.** `deploy-root.sh`'s
+"negative" permission checks literally called `systemctl start
+omnissa-ingest-scan.service`/`omnissa-analysis-scan.service` as
+`georjero`. `georjero`'s `sudo` membership makes it a polkit admin
+identity, so this triggered a real interactive authentication prompt;
+the operator answered it (reasonably, not realizing a "check" would do
+this), and both services actually ran. Fixed: those checks are removed
+entirely, replaced by a non-mutating read of polkit's declared policy
+(`pkaction --verbose`, confirms `auth_admin` is always required — never
+invoked). See `tests/test_deploy_script_safety.py`'s
+`test_no_negative_probe_ever_invokes_a_mutating_systemctl_verb` and
+`test_check_helper_negative_probes_are_all_read_only_commands`.
+
+As a direct consequence, an earlier ingest run's 50 real messages were
+overwritten by a later empty drop before analysis ever consumed them —
+marked "ingested" (so never re-fetched) but never classified. See §3's
+merge-fix. **Recovery needed on next deployment**: after redeploying
+this fix, delete `/var/lib/omnissa-ingest/state/checkpoint.json` once
+(root; contains only message ids, no secrets) so the next ingest run
+re-fetches everything currently under the label fresh — nothing was
+altered on the Gmail side, so this is a full, safe recovery, not a
+workaround.
+
 ## 1. Architecture — who runs what
 
 | Stage | Process / identity | Code | Network it can reach |
@@ -83,6 +109,20 @@ off/asleep) fires once at next boot instead of silently vanishing.
   a drop file older than that, in case it's ever triggered out-of-band
   against stale data (manual testing, a restarted OnSuccess chain, etc.)
   — the normal OnSuccess-chained path is always seconds-fresh.
+- **`ingest` MERGES with, never overwrites, an unconsumed prior drop.**
+  A real incident (2026-09-29) confirmed why this matters: one ingest
+  run fetched 50 real messages and wrote them; the next run found 0 new
+  messages (correctly — already recorded in `gmail_ingested_ids`) and
+  overwrote the drop file with an empty one before analysis ever read
+  it, permanently losing those 50 from classification even though they
+  were never altered on the Gmail side. `gmail_ingest.merge_pending`
+  now combines an existing pending file's messages with a fresh run's
+  instead of replacing it (safe to concatenate without re-dedup — ids
+  across two ingest runs are disjoint by construction). `classify`
+  deletes the drop file only once its data has actually been used (a
+  report was written); a refused/unreadable file is left in place for
+  inspection. See `tests/test_drop_file_merge_and_consume.py`, which
+  replays the exact incident sequence as a regression test.
 
 ## 3. Health, status, logs
 

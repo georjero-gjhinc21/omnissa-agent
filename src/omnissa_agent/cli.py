@@ -413,6 +413,20 @@ def _ingest(args) -> int:
 
     out_path = Path(args.out)
     out_path.parent.mkdir(parents=True, exist_ok=True)
+
+    # MERGE with, never overwrite, an unconsumed prior drop -- see
+    # gmail_ingest.merge_pending's docstring for the real incident this
+    # fixes. A pending file only exists if a previous `classify` run
+    # never got to (or never finished) consuming it; `classify` deletes
+    # the file on successful consumption, so its mere presence here IS
+    # the "not yet consumed" signal -- no separate marker needed.
+    if out_path.exists():
+        try:
+            prior = gmail_ingest.IngestionResult.from_json_dict(json.loads(out_path.read_text()))
+            ingest_result = gmail_ingest.merge_pending(prior, ingest_result)
+        except Exception as exc:
+            print(f"WARNING: could not read prior pending drop file, not merging: {exc}", file=sys.stderr)
+
     tmp_path = out_path.with_suffix(".tmp")
     tmp_path.write_text(json.dumps(ingest_result.to_json_dict(), indent=2))
     tmp_path.chmod(0o640)  # owner rw, group r -- the narrow one-way handoff
@@ -462,7 +476,22 @@ def _classify(args) -> int:
             )
             return REFUSED
 
-    return _pipeline_from_ingest_result(ingest_result, kind=args.kind, args=args)
+    rc = _pipeline_from_ingest_result(ingest_result, kind=args.kind, args=args)
+
+    # Delete the drop file ONLY once its data has actually been
+    # classified (status OK -- a report was written, whether or not the
+    # LLM step was deferred or the ingest side was partial). This is
+    # what tells the NEXT `ingest` run there is nothing pending to merge
+    # with. On a refusal (bad account/label recorded in the file, or
+    # unreadable input), the file is left in place for inspection/retry
+    # -- never silently discarded.
+    if ingest_result.status == gmail_ingest.IngestStatus.OK:
+        try:
+            in_path.unlink()
+        except OSError as exc:
+            print(f"WARNING: classified successfully but could not remove {in_path}: {exc}", file=sys.stderr)
+
+    return rc
 
 
 def main(argv: list[str] | None = None) -> int:

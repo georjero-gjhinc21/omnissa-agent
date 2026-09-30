@@ -206,22 +206,28 @@ def test_ingest_reports_partial_not_ok_when_deadline_hit(tmp_path, monkeypatch, 
 
 
 def test_classify_report_group_readable_flag_controls_file_mode(tmp_path):
-    drop = tmp_path / "drop.json"
     result = gmail_ingest.IngestionResult(status=gmail_ingest.IngestStatus.OK, account="x", label_id="L", label_name="L")
-    drop.write_text(json.dumps(result.to_json_dict()))
 
-    rc = cli.main(["classify", "--kind", "scan", "--ingest-result", str(drop), "--state-dir", str(tmp_path / "a")])
+    # classify deletes the drop file on successful consumption, so each
+    # call gets its own fresh file rather than reusing one across calls
+    drop_a = tmp_path / "drop-a.json"
+    drop_a.write_text(json.dumps(result.to_json_dict()))
+    rc = cli.main(["classify", "--kind", "scan", "--ingest-result", str(drop_a), "--state-dir", str(tmp_path / "a")])
     assert rc == 0
+    assert not drop_a.exists()
     default_report = list((tmp_path / "a" / "reports").glob("*.md"))[0]
     assert (default_report.stat().st_mode & 0o777) == 0o600
 
+    drop_b = tmp_path / "drop-b.json"
+    drop_b.write_text(json.dumps(result.to_json_dict()))
     rc2 = cli.main(
         [
-            "classify", "--kind", "scan", "--ingest-result", str(drop),
+            "classify", "--kind", "scan", "--ingest-result", str(drop_b),
             "--state-dir", str(tmp_path / "b"), "--report-group-readable",
         ]
     )
     assert rc2 == 0
+    assert not drop_b.exists()
     group_report = list((tmp_path / "b" / "reports").glob("*.md"))[0]
     assert (group_report.stat().st_mode & 0o777) == 0o640
 
