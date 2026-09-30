@@ -75,9 +75,12 @@ def test_allowed_labels_matches_the_real_config_partners_yaml():
     assert ALLOWED_LABELS == expected
     assert "Archive_/@omnissa.com" in ALLOWED_LABELS
     assert "Archive_/@microsoft.com" in ALLOWED_LABELS
-    assert "Archive_/@google.com" in ALLOWED_LABELS
-    assert "Archive_/@nvidia.com" in ALLOWED_LABELS
+    assert "Archive_/@barracuda.com" in ALLOWED_LABELS
+    assert "Archive_/@tdsynnex.com" in ALLOWED_LABELS
+    assert "Archive_/@arrow.com" in ALLOWED_LABELS
+    assert "Archive_/@carahsoft" in ALLOWED_LABELS  # confirmed, no ".com" -- not a typo
     assert "Archive_/@planetbids.com" in ALLOWED_LABELS
+    assert "Archive_/@zireh" in ALLOWED_LABELS  # confirmed, no ".com" -- not a typo
 
 
 def test_a_fake_unlisted_partner_label_is_refused():
@@ -116,9 +119,12 @@ def test_custom_allowed_labels_override_is_honored_for_non_default_configs():
         )
 
 
-def test_barracuda_is_not_yet_in_the_allowlist():
-    """Confirms the explicit operator instruction was followed: this
-    session had no live Gmail credential to run `cli.py list-labels`
-    and confirm the exact barracuda label name, so it stays commented
-    out in config/partners.yaml -- not guessed, not added speculatively."""
-    assert "Archive_/@barracuda.com" not in ALLOWED_LABELS
+def test_google_and_zoom_are_not_yet_in_the_allowlist():
+    """barracuda was confirmed via `cli.py list-labels` (2026-09-30) and
+    is now live in config/partners.yaml. google/zoom were requested in
+    conversation but never confirmed the same way -- carahsoft/zireh's
+    real labels (no ".com") already proved the naming pattern isn't
+    reliable enough to guess from, so these two stay commented out
+    rather than added speculatively."""
+    assert "Archive_/@google.com" not in ALLOWED_LABELS
+    assert "Archive_/@zoom.com" not in ALLOWED_LABELS

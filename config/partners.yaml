@@ -9,20 +9,40 @@
 # see that module's docstring for why). Keep this exact shape: a
 # top-level `partners:` key, then `- id: <slug>` / `label: "<exact
 # Gmail label name>"` pairs, one per partner.
+#
+# Operator-confirmed (2026-09-30, via `cli.py list-labels` against the
+# real mailbox) -- note carahsoft/zireh have NO ".com" suffix, unlike
+# the others; that's the real confirmed label text, not a typo, so it
+# stays exactly as given rather than being "corrected" to match the
+# other entries' pattern.
 partners:
   - id: omnissa
     label: "Archive_/@omnissa.com"
   - id: microsoft
     label: "Archive_/@microsoft.com"
-  - id: google
-    label: "Archive_/@google.com"
-  - id: nvidia
-    label: "Archive_/@nvidia.com"
+  - id: barracuda
+    label: "Archive_/@barracuda.com"
+  - id: tdsynnex
+    label: "Archive_/@tdsynnex.com"
+  - id: arrow
+    label: "Archive_/@arrow.com"
+  - id: carahsoft
+    label: "Archive_/@carahsoft"
   - id: planetbids
     label: "Archive_/@planetbids.com"
+  - id: zireh
+    label: "Archive_/@zireh"
 
-# UNVERIFIED -- do not uncomment until `cli.py list-labels` (run against
-# the real mailbox) confirms this EXACT name exists. Not confirmed as of
-# 2026-09-30 -- this session has no live Gmail credential to check it.
-#  - id: barracuda
-#    label: "Archive_/@barracuda.com"
+# UNVERIFIED -- requested ("include also google, zoom") but NOT
+# confirmed via `cli.py list-labels` against the real mailbox. Given
+# carahsoft/zireh above just proved this operator's real label names
+# don't reliably follow the "@<domain>.com" pattern, guessing the exact
+# string for these two and adding them live would risk silently
+# fetching the wrong label if a differently-intended one happens to
+# match -- or just never resolving if it doesn't. Run `cli.py
+# list-labels` and tell me (or edit this file with) the exact strings,
+# then uncomment:
+#  - id: google
+#    label: "Archive_/@google.com"
+#  - id: zoom
+#    label: "Archive_/@zoom.com"

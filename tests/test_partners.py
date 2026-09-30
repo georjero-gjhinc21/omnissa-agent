@@ -48,7 +48,23 @@ def test_unquoted_values_also_parse():
 def test_load_partner_allowlist_from_the_real_repo_config():
     result = load_partner_allowlist()
     ids = {p.id for p in result}
-    assert ids == {"omnissa", "microsoft", "google", "nvidia", "planetbids"}
+    assert ids == {
+        "omnissa", "microsoft", "barracuda", "tdsynnex", "arrow", "carahsoft", "planetbids", "zireh",
+    }
+    # google/zoom are deliberately commented out pending a confirmed
+    # exact label name via `cli.py list-labels` -- must not silently
+    # appear just because someone asked for them in conversation.
+    assert "google" not in ids
+    assert "zoom" not in ids
+
+
+def test_carahsoft_and_zireh_labels_have_no_dot_com_suffix_exactly_as_confirmed():
+    """These two really don't follow the "@<domain>.com" pattern the
+    others do -- confirmed by the operator via `cli.py list-labels`,
+    not a typo to "fix" back to the pattern."""
+    result = {p.id: p.label for p in load_partner_allowlist()}
+    assert result["carahsoft"] == "Archive_/@carahsoft"
+    assert result["zireh"] == "Archive_/@zireh"
 
 
 def test_load_partner_allowlist_falls_back_to_single_omnissa_when_no_config_file(tmp_path):

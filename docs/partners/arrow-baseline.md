@@ -1,7 +1,7 @@
-# NVIDIA partner baseline
+# Arrow partner baseline
 
 Stub — no sourced facts yet. Fill in as real Gmail threads under
-`Archive_/@nvidia.com` are reviewed; cite every fact as Gmail thread +
+`Archive_/@arrow.com` are reviewed; cite every fact as Gmail thread +
 date, same standard as `docs/partners/omnissa-baseline.md`. No
 invented status — an unconfirmed field stays `OPEN`/`UNKNOWN`.
 
