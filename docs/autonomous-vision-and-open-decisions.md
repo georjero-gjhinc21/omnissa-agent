@@ -174,10 +174,30 @@ Operator confirmed, explicitly:
   narrowly-scoped step (privileged side) creates the Gmail draft from
   that text. No new capability is added to `omnissa-analysis` itself.
 
-## 8. Status
+## 8. Status (updated 2026-09-30)
 
-Stage 1 and Stage 2 are approved in direction; Stage 3 is declined.
-Nothing above is implemented yet -- one product decision (§6) is
-needed before writing Stage 1, and Stage 2 is blocked on the
-operator's own OAuth re-consent step regardless of when the code is
-ready.
+- **§6 product decision: reorder-only, confirmed.** Stage 1 is
+  implemented: `focus.py` (validated instruction resolution), reorder
+  logic in `agent_a.reorder_for_focus`, wired through
+  `pipeline.run_pilot` and `cli.py`'s `ingest --focus-out` /
+  `classify --focus-in`, the deployed unit files updated to pass both
+  (takes effect on the next `deploy-root.sh` run), and full test
+  coverage in `tests/test_focus.py` + additions to
+  `tests/test_agent_a_and_b.py` and `tests/test_cli_ingest_classify.py`.
+  See `docs/operations-record.md` §5b for the operator-facing how-to.
+- **Stage 2 (research-to-brief workflow): scaffolded, not live.**
+  `research.py` implements the full data model (opportunity, contact
+  recommendation, revenue path, provenance), dedup/carry-forward, and
+  markdown rendering matching the requested brief shape. Demonstrated
+  via `cli.py research-demo` using explicit sample data only — no live
+  webinar/transcript/public-partner-info source is connected, since
+  that requires a real network-access decision for a currently
+  network-restricted identity (`omnissa-analysis`), not something to
+  add silently. See `docs/operations-record.md` §5c.
+- **Stage 2's draft-to-self email report: not implemented at all**,
+  by design -- see §5c above. `tests/test_no_write_capability.py`
+  staying red on any draft-capable code is the intended hard stop
+  until the operator's own `gmail.compose` re-consent and an explicit
+  decision to relax that test.
+- **Stage 3 (autonomous real-world action): declined.** Not built, not
+  planned.

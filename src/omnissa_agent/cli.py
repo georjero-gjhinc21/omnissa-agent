@@ -71,7 +71,8 @@ import sys
 import time
 from pathlib import Path
 
-from . import gmail_ingest, google_oauth, router
+from . import focus as focus_mod
+from . import gmail_ingest, google_oauth, research, router
 from . import lock as lock_mod
 from . import state as state_mod
 from .agent_a import Finding
@@ -361,6 +362,21 @@ def _requeue(args) -> int:
     return 0
 
 
+def _research_demo(args) -> int:
+    """Offline, sample-data-only demonstration of the Stage 2 research
+    brief shape -- see research.py's module docstring. No network, no
+    credential, never scheduled; not the real classify pipeline's
+    output, and never mixed with it.
+    """
+    text = research.render_research_brief(research.sample_opportunities(), focus_category=args.focus)
+    if args.out:
+        Path(args.out).write_text(text)
+        print(f"wrote {args.out}")
+    else:
+        print(text)
+    return 0
+
+
 def _draft(args) -> int:
     """The ONLY path that ever produces a real (non-synthetic) Agent B
     draft. A human types the summary and picks the confidence themselves
@@ -401,7 +417,9 @@ def _draft(args) -> int:
     return 0
 
 
-def _pipeline_from_ingest_result(ingest_result, *, kind: str, args, quiet_content: bool = False) -> int:
+def _pipeline_from_ingest_result(
+    ingest_result, *, kind: str, args, quiet_content: bool = False, focus_category: str | None = None
+) -> int:
     """Shared back half: a verified IngestionResult -> Agent A/B -> report.
 
     Used by both ``run`` (single-process, credential-holding) and
@@ -444,6 +462,7 @@ def _pipeline_from_ingest_result(ingest_result, *, kind: str, args, quiet_conten
         email_status=email_status,
         use_llm=(kind == "brief"),
         llm_combo=llm_combo,
+        focus_category=focus_category,
         max_messages=args.max_messages,
         state_base=state_base,
     )
@@ -491,7 +510,9 @@ def _pipeline_from_ingest_result(ingest_result, *, kind: str, args, quiet_conten
         f"message_list_truncated={message_list_truncated}"
     )
     if quiet_content:
-        print(f"findings={report.findings_count} drafts={report.drafts_count}")
+        # focus_category is a small, fixed-vocabulary category name (e.g.
+        # "Renewal"), never message content -- safe to log even here.
+        print(f"findings={report.findings_count} drafts={report.drafts_count} focus={focus_category or 'none'}")
     else:
         print(report.brief_markdown)
     if report.llm_backend:
@@ -548,7 +569,13 @@ def _run_live(args, *, kind: str) -> int:
         deadline_s=args.deadline,
         state_base=state_base,
     )
-    return _pipeline_from_ingest_result(ingest_result, kind=kind, args=args)
+    # Best-effort, non-fatal (see focus.resolve_focus_instruction): this
+    # single-process path already holds the same read-only Gmail client
+    # ingest/classify would use separately, so it can check for a focus
+    # instruction directly -- no new flag needed here.
+    instruction = focus_mod.resolve_focus_instruction(gmail_client)
+    focus_category = instruction.category if instruction else None
+    return _pipeline_from_ingest_result(ingest_result, kind=kind, args=args, focus_category=focus_category)
 
 
 def _ingest(args) -> int:
@@ -603,6 +630,25 @@ def _ingest_locked(args, client_config, access_token, state_base) -> int:
         deadline_s=args.deadline,
         state_base=state_base,
     )
+
+    # Optional, best-effort focus handoff to classify -- see focus.py.
+    # Re-resolved fresh EVERY run (never cached beyond one cycle): an
+    # operator changes focus by labeling a new message, and a stale one
+    # ages out on its own via focus.FOCUS_MAX_AGE_HOURS. Always
+    # overwritten (never merged) -- unlike the message drop file, there
+    # is nothing here to lose by replacing it outright each run.
+    focus_out = getattr(args, "focus_out", None)
+    if focus_out:
+        focus_path = Path(focus_out)
+        instruction = focus_mod.resolve_focus_instruction(gmail_client)
+        if instruction is None:
+            focus_path.unlink(missing_ok=True)
+        else:
+            focus_path.parent.mkdir(parents=True, exist_ok=True)
+            focus_tmp = focus_path.with_suffix(".tmp")
+            focus_tmp.write_text(json.dumps(instruction.to_json_dict()))
+            focus_tmp.chmod(0o640)
+            focus_tmp.replace(focus_path)
 
     out_path = Path(args.out)
     out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -669,6 +715,23 @@ def _classify(args) -> int:
             )
             return REFUSED
 
+    # Optional focus instruction, written by ingest (see focus.py). Only
+    # a small, fixed-vocabulary category name ever crosses this
+    # boundary -- never message content. Any problem reading it (file
+    # missing, corrupt, unknown category) is silently treated as "no
+    # focus this run" -- exactly the same fail-open-to-normal-brief
+    # behavior ingest itself uses when resolving the instruction live.
+    focus_category = None
+    focus_in = getattr(args, "focus_in", None)
+    if focus_in and Path(focus_in).exists():
+        try:
+            focus_data = json.loads(Path(focus_in).read_text())
+            instruction = focus_mod.FocusInstruction.from_json_dict(focus_data)
+        except Exception:
+            instruction = None
+        if instruction is not None:
+            focus_category = instruction.category
+
     # scan and brief classify share the SAME --state-dir (and therefore
     # the same checkpoint.json) on the analysis identity. This is
     # ALREADY locked -- pipeline.run_pilot (called via
@@ -680,7 +743,9 @@ def _classify(args) -> int:
     # lock as "already held" and self-block on every single run --
     # confirmed live (2026-09-30) as a real regression while adding
     # locking to `ingest`, which had no equivalent existing protection.
-    rc = _pipeline_from_ingest_result(ingest_result, kind=args.kind, args=args, quiet_content=True)
+    rc = _pipeline_from_ingest_result(
+        ingest_result, kind=args.kind, args=args, quiet_content=True, focus_category=focus_category
+    )
 
     # Delete the drop file ONLY once every message it held has actually
     # been classified. Checked independently of `rc` here (not just
@@ -833,6 +898,13 @@ def main(argv: list[str] | None = None) -> int:
     ingest_p.add_argument("--max-pages", type=int, default=5)
     ingest_p.add_argument("--deadline", type=float, default=90.0)
     ingest_p.add_argument("--state-dir", default=None)
+    ingest_p.add_argument(
+        "--focus-out",
+        default=None,
+        help="path to write a resolved focus instruction for classify to read (see focus.py). "
+        "Optional -- omitting it means no focus handoff at all, same as today's behavior. "
+        "Re-resolved and overwritten fresh every run; never merged like the message drop.",
+    )
 
     classify_p = sub.add_parser(
         "classify",
@@ -862,6 +934,14 @@ def main(argv: list[str] | None = None) -> int:
     )
     classify_p.add_argument("--state-dir", default=None)
     classify_p.add_argument(
+        "--focus-in",
+        default=None,
+        help="path to a focus instruction written by ingest --focus-out (see focus.py). "
+        "Optional -- omitting it (default) means the normal, unmodified brief, exactly "
+        "today's behavior. A missing/corrupt/unrecognized file is silently treated the "
+        "same as omitting the flag, never an error.",
+    )
+    classify_p.add_argument(
         "--llm-policy", choices=["local-only", "combo-continuous"], default="local-only"
     )
     classify_p.add_argument(
@@ -882,6 +962,15 @@ def main(argv: list[str] | None = None) -> int:
         "(e.g. a sibling of the drop directory).",
     )
 
+    demo_p = sub.add_parser(
+        "research-demo",
+        help="OFFLINE, SAMPLE DATA ONLY -- demonstrates the Stage 2 research-note/contact/"
+        "revenue-path brief shape (research.py). No network call, no credential, not "
+        "scheduled anywhere -- see docs/autonomous-vision-and-open-decisions.md.",
+    )
+    demo_p.add_argument("--focus", default=None, help="a category name, to demo reorder-only focus")
+    demo_p.add_argument("--out", default=None, help="write to this path instead of stdout")
+
     args = parser.parse_args(argv)
     if args.command == "scan":
         return _run(args, kind="scan", use_llm=False)
@@ -901,6 +990,8 @@ def main(argv: list[str] | None = None) -> int:
         return _ingest(args)
     if args.command == "classify":
         return _classify(args)
+    if args.command == "research-demo":
+        return _research_demo(args)
     return _run_live(args, kind=args.kind)
 
 

@@ -46,6 +46,7 @@ def run_pilot(
     llm_combo: str = router.LOCAL_ONLY_COMBO,
     state_base: Path | None = None,
     demo_findings: list[agent_a.Finding] | None = None,
+    focus_category: str | None = None,
 ) -> PilotReport:
     start = time.monotonic()
     try:
@@ -67,7 +68,11 @@ def run_pilot(
             state_mod.save_state(st, state_base)
 
             brief = agent_a.build_brief(
-                result, email_status=email_status, use_llm=use_llm, llm_combo=llm_combo
+                result,
+                email_status=email_status,
+                use_llm=use_llm,
+                llm_combo=llm_combo,
+                focus_category=focus_category,
             )
 
             findings_for_drafting = list(result.findings) + list(demo_findings or [])

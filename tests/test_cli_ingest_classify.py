@@ -5,7 +5,7 @@ here -- refresh_access_token and run_ingestion are monkeypatched.
 
 import json
 
-from omnissa_agent import cli, gmail_ingest
+from omnissa_agent import cli, focus as focus_mod, gmail_ingest
 from omnissa_agent.sources import GmailMessage
 
 
@@ -411,6 +411,119 @@ def test_run_scan_still_prints_the_brief_to_stdout_for_manual_use(tmp_path, caps
     ])
     assert rc == 0
     assert "Omnissa Q4 MDF grant approval" in capsys.readouterr().out
+
+
+def test_ingest_writes_focus_out_when_an_instruction_is_found(tmp_path, monkeypatch):
+    monkeypatch.setattr(cli.google_oauth, "refresh_access_token", lambda cc, tp: "at")
+    monkeypatch.setattr(
+        cli.gmail_ingest, "run_ingestion",
+        lambda *a, **k: gmail_ingest.IngestionResult(status=gmail_ingest.IngestStatus.OK, account="x", label_id="L", label_name="L"),
+    )
+    monkeypatch.setattr(
+        cli.focus_mod, "resolve_focus_instruction",
+        lambda *a, **k: focus_mod.FocusInstruction(category="Renewal", source_message_id="f1"),
+    )
+    focus_out = tmp_path / "focus.json"
+    rc = cli.main([
+        "ingest", "--client-secret", str(_fake_client_secret(tmp_path)), "--token", str(_fake_token(tmp_path)),
+        "--out", str(tmp_path / "drop.json"), "--state-dir", str(tmp_path), "--focus-out", str(focus_out),
+    ])
+    assert rc == 0
+    assert json.loads(focus_out.read_text()) == {"category": "Renewal", "source_message_id": "f1"}
+
+
+def test_ingest_removes_a_stale_focus_out_when_no_instruction_is_found(tmp_path, monkeypatch):
+    monkeypatch.setattr(cli.google_oauth, "refresh_access_token", lambda cc, tp: "at")
+    monkeypatch.setattr(
+        cli.gmail_ingest, "run_ingestion",
+        lambda *a, **k: gmail_ingest.IngestionResult(status=gmail_ingest.IngestStatus.OK, account="x", label_id="L", label_name="L"),
+    )
+    monkeypatch.setattr(cli.focus_mod, "resolve_focus_instruction", lambda *a, **k: None)
+    focus_out = tmp_path / "focus.json"
+    focus_out.write_text('{"category": "Renewal", "source_message_id": "old"}')  # left over from a prior run
+    rc = cli.main([
+        "ingest", "--client-secret", str(_fake_client_secret(tmp_path)), "--token", str(_fake_token(tmp_path)),
+        "--out", str(tmp_path / "drop.json"), "--state-dir", str(tmp_path), "--focus-out", str(focus_out),
+    ])
+    assert rc == 0
+    assert not focus_out.exists(), "a stale/expired focus must not linger and silently keep applying"
+
+
+def test_ingest_without_focus_out_flag_is_unaffected(tmp_path, monkeypatch):
+    """Omitting --focus-out entirely (today's default) must never touch
+    Gmail for focus resolution at all -- confirmed by making the mock
+    raise if it's ever called."""
+    monkeypatch.setattr(cli.google_oauth, "refresh_access_token", lambda cc, tp: "at")
+    monkeypatch.setattr(
+        cli.gmail_ingest, "run_ingestion",
+        lambda *a, **k: gmail_ingest.IngestionResult(status=gmail_ingest.IngestStatus.OK, account="x", label_id="L", label_name="L"),
+    )
+    def _boom(*a, **k):
+        raise AssertionError("resolve_focus_instruction must not be called without --focus-out")
+    monkeypatch.setattr(cli.focus_mod, "resolve_focus_instruction", _boom)
+    rc = cli.main([
+        "ingest", "--client-secret", str(_fake_client_secret(tmp_path)), "--token", str(_fake_token(tmp_path)),
+        "--out", str(tmp_path / "drop.json"), "--state-dir", str(tmp_path),
+    ])
+    assert rc == 0
+
+
+def test_classify_applies_a_valid_focus_in_file_reorder_only(tmp_path):
+    drop = tmp_path / "drop.json"
+    result = gmail_ingest.IngestionResult(
+        status=gmail_ingest.IngestStatus.OK, account="x", label_id="L", label_name="L",
+        messages=[
+            GmailMessage(id="m1", subject="General item", snippet="hi", sender="a@omnissa.com", date="2026-09-29", label_ids=("L",)),
+            GmailMessage(id="m2", subject="Renewal notice", snippet="hi", sender="a@omnissa.com", date="2026-09-29", label_ids=("L",)),
+        ],
+    )
+    drop.write_text(json.dumps(result.to_json_dict()))
+    focus_in = tmp_path / "focus.json"
+    focus_in.write_text(json.dumps({"category": "Renewal", "source_message_id": "prior"}))
+
+    rc = cli.main([
+        "classify", "--kind", "scan", "--ingest-result", str(drop),
+        "--state-dir", str(tmp_path), "--focus-in", str(focus_in),
+    ])
+    assert rc == 0
+    report = list((tmp_path / "reports").glob("*-scan.md"))[0].read_text()
+    assert "Focus: Renewal" in report
+    findings_lines = [l for l in report.splitlines() if l.startswith("- [")]
+    assert findings_lines[0].startswith("- [Renewal]")
+    assert len(findings_lines) == 2, "both findings must still be present -- reorder only"
+
+
+def test_classify_ignores_a_corrupt_focus_in_file_without_crashing(tmp_path):
+    drop = tmp_path / "drop.json"
+    result = gmail_ingest.IngestionResult(
+        status=gmail_ingest.IngestStatus.OK, account="x", label_id="L", label_name="L",
+        messages=[GmailMessage(id="m1", subject="General item", snippet="hi", sender="a@omnissa.com", date="2026-09-29", label_ids=("L",))],
+    )
+    drop.write_text(json.dumps(result.to_json_dict()))
+    focus_in = tmp_path / "focus.json"
+    focus_in.write_text("not valid json{{{")
+
+    rc = cli.main([
+        "classify", "--kind", "scan", "--ingest-result", str(drop),
+        "--state-dir", str(tmp_path), "--focus-in", str(focus_in),
+    ])
+    assert rc == 0  # never a crash/refusal just because the focus side-channel is corrupt
+    report = list((tmp_path / "reports").glob("*-scan.md"))[0].read_text()
+    assert "Focus:" not in report.split("## Findings")[0]
+
+
+def test_classify_without_focus_in_flag_produces_the_exact_normal_brief(tmp_path):
+    drop = tmp_path / "drop.json"
+    result = gmail_ingest.IngestionResult(
+        status=gmail_ingest.IngestStatus.OK, account="x", label_id="L", label_name="L",
+        messages=[GmailMessage(id="m1", subject="General item", snippet="hi", sender="a@omnissa.com", date="2026-09-29", label_ids=("L",))],
+    )
+    drop.write_text(json.dumps(result.to_json_dict()))
+
+    rc = cli.main(["classify", "--kind", "scan", "--ingest-result", str(drop), "--state-dir", str(tmp_path)])
+    assert rc == 0
+    report = list((tmp_path / "reports").glob("*-scan.md"))[0].read_text()
+    assert "Focus:" not in report.split("## Findings")[0]
 
 
 def test_ingest_and_classify_end_to_end_produce_the_same_result_as_run(tmp_path, monkeypatch):

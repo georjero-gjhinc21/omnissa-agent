@@ -354,6 +354,83 @@ targeted replay is impossible (e.g. the checkpoint file itself is
 corrupted beyond parsing) — in that case document exactly why targeted
 recovery couldn't be used before falling back to it.
 
+## 5b. Focus instructions (Stage 1 -- reorder-only)
+
+Full design/risk writeup: `docs/autonomous-vision-and-open-decisions.md`.
+This is the operator-facing quick reference.
+
+**How to set a focus, as the operator:** apply the exact Gmail label
+`Agent-Focus` (create it once, in your own mailbox) to a message whose
+**subject line** is exactly `Focus: <category>` — e.g. `Focus:
+Renewal`. Valid categories are the same ones Agent A already uses:
+`Grant/Funding`, `Incentive`, `Training`, `Certification`, `Renewal`,
+`Deal Registration`, `Access Request`, `Product/NFR`, `General`
+(case-insensitive). The next scheduled `ingest` run (hourly) picks it
+up automatically — no restart, no redeploy needed once this is live.
+
+**What it does:** the next brief lists matching findings first. That's
+the entire effect. It does not hide anything, does not change any
+finding's classification or confidence, and does not mark anything
+urgent. The brief itself says so explicitly (`Focus: <category>
+(matching findings shown first this run -- nothing hidden, no
+classification or urgency changed)`).
+
+**How it stops applying, without you doing anything:** the label is
+re-resolved fresh on every `ingest` run using only the single most
+recent message under it. If that message is older than
+`focus.FOCUS_MAX_AGE_HOURS` (48h default), it's treated as if there
+were no instruction at all — the normal brief resumes on its own. To
+change focus, label a new message; to clear it early, remove the label
+from the current one (an empty label means no instruction, same as
+none ever being set).
+
+**Trust boundary, by design:** only the `Agent-Focus` label counts, and
+only a message's Subject header is ever read for this — never the
+body, never a snippet, never any other label's content (including the
+real `Archive_/@omnissa.com` mail this system already reads). An
+unrecognized category, a malformed subject, or a missing/ambiguous
+label are all silently equivalent to "no instruction" — never an error,
+never a refusal of the underlying scan/brief. See `focus.py` and
+`tests/test_focus.py`.
+
+**Wiring:** `ingest --focus-out <path>` resolves and writes the current
+instruction (or removes the file if none/stale); `classify --focus-in
+<path>` reads it. Both flags are optional and default to off — omitting
+either reproduces exactly today's behavior, unchanged. The deployed
+units already pass both, pointed at a shared
+`/var/lib/omnissa-agent/drop/focus.json` (inside the same
+already-read-write directory both identities can already reach — no
+new permission grant) — **this takes effect only after the next
+`deploy-root.sh` run**, same as any other source change.
+
+## 5c. Research notes / opportunities / contacts / revenue path (Stage 2)
+
+**Status: data model and rendering only (`research.py`), not live.**
+`cli.py research-demo` renders the shape using explicit, loudly-labeled
+SAMPLE data (`research.sample_opportunities()`) — offline, no network
+call, no credential, never scheduled, and never mixed into the real
+`classify` pipeline's own report. Try it: `python3 -m omnissa_agent.cli
+research-demo` (add `--focus <category>` to see the same reorder-only
+behavior applied to opportunities).
+
+This is intentionally not wired to any live source. Discovering real
+webinars/recordings/public partner info would mean giving some
+identity real internet access to fetch and interpret third-party
+content — `omnissa-analysis` has none today (`IPAddressDeny=any`), and
+widening that is a real architecture decision, not something to slip
+in in passing. See `docs/autonomous-vision-and-open-decisions.md` §6-8
+for the staged path.
+
+**The draft-to-self Gmail report (also Stage 2) has NOT been
+implemented at all, deliberately** — not merely left inactive. Writing
+working Gmail-draft-creation code anywhere under `src/` would trip
+`tests/test_no_write_capability.py`, a standing, automated hard-stop
+that scans the entire source tree for exactly this capability. That
+test staying red is the point, not a bug to route around — it means
+this capability has to wait for the operator's own `gmail.compose`
+OAuth re-consent AND a deliberate decision to relax that test, not
+happen quietly alongside an unrelated feature.
+
 ## 6. Data retention
 
 - Reports/drafts accumulate under `/var/lib/omnissa-agent/reports/`

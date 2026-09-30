@@ -92,12 +92,30 @@ def classify_messages(messages: list[GmailMessage], *, seen_ids: set[str]) -> Ag
     return result
 
 
+def reorder_for_focus(findings: list[Finding], focus_category: str | None) -> list[Finding]:
+    """Return a NEW list for rendering, with any finding whose category
+    matches `focus_category` moved first -- stable order preserved
+    within each group otherwise. Never mutates `findings`, never drops
+    or alters an entry: reorder only, by explicit product decision
+    (2026-09-30) -- a focus instruction must not hide anything, and
+    must not change a finding's classification or urgency merely
+    because it matched. `focus_category=None` (no valid, fresh
+    instruction) returns an unchanged copy -- the normal brief.
+    """
+    if not focus_category:
+        return list(findings)
+    matching = [f for f in findings if f.category == focus_category]
+    rest = [f for f in findings if f.category != focus_category]
+    return matching + rest
+
+
 def build_brief(
     result: AgentAResult,
     *,
     email_status: str,
     use_llm: bool = False,
     llm_combo: str = router.LOCAL_ONLY_COMBO,
+    focus_category: str | None = None,
 ) -> str:
     """Build the markdown brief.
 
@@ -108,17 +126,29 @@ def build_brief(
     policies (see docs/gmail-ingestion-security-review.md). Pass
     ``combo-continuous`` explicitly only when the operator has approved
     sending this content off-box (fine for synthetic/test data).
+
+    ``focus_category``: set only from a validated, fresh
+    ``focus.FocusInstruction`` -- see reorder_for_focus above. Anything
+    else (no instruction, invalid, stale) must pass ``None`` here,
+    which reproduces the exact unmodified brief.
     """
     lines = [
         "# GJH INC -- Omnissa Daily Brief",
         "",
         f"Authorized email label status: {email_status}",
         "",
-        "## Findings",
     ]
-    if not result.findings:
+    if focus_category:
+        lines.append(
+            f"Focus: {focus_category} (matching findings shown first this run -- "
+            "nothing hidden, no classification or urgency changed)"
+        )
+        lines.append("")
+    lines.append("## Findings")
+    ordered_findings = reorder_for_focus(result.findings, focus_category)
+    if not ordered_findings:
         lines.append("- none this run")
-    for f in result.findings:
+    for f in ordered_findings:
         lines.append(
             f"- [{f.category}] {f.summary} -- confidence={f.confidence}, "
             f"due={f.due_date}, action={f.required_action} (ref {f.source_ref})"

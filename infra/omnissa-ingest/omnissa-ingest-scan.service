@@ -21,7 +21,8 @@ ExecStart=/opt/omnissa-agent/venv/bin/python3 -m omnissa_agent.cli ingest \
   --token /var/lib/omnissa-ingest/google/token.json \
   --out /var/lib/omnissa-agent/drop/latest-scan.json \
   --max-messages 50 --max-pages 5 --deadline 90 \
-  --state-dir /var/lib/omnissa-ingest/state
+  --state-dir /var/lib/omnissa-ingest/state \
+  --focus-out /var/lib/omnissa-agent/drop/focus.json
 TimeoutStartSec=120
 
 # Hardening -- this identity does exactly one thing and needs almost nothing
