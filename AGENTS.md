@@ -23,7 +23,8 @@ other agent's paths.
 - Test command: `python3 -m pytest tests/ -q` (must stay green).
 - Lint: `bash -n <script>`; `python3 -m py_compile <file>`.
 - Never edit: `~/.config/omniroute/`, `~/.opencode/`, `~/.kiro/`,
-  live tokens/credentials, any mailbox data outside the `Omnissa` label.
+  live tokens/credentials, any mailbox data outside the labels listed
+  in `config/partners.yaml`.
 
 ## Router use (this machine)
 
@@ -35,15 +36,32 @@ other agent's paths.
 
 ## Gmail guardrails (hard rules)
 
-1. Day one is **read-only**. No send, no label mutation, no credential
-   submission (courses, partner portal) without explicit user approval.
-2. Scope is Gmail label **`Omnissa`** on `consult@gjh-inc.com` only.
-   Never list/search/read other labels, never widen a query to `in:all`.
-3. OAuth token (when approved) lives mode `600` on Spark, scope
-   `gmail.readonly` first. `gmail.send` only when user explicitly grants.
-4. Every fetch helper MUST take `label_ids=["Omnissa"]` (or equivalent)
-   and reject calls without it — see `src/omnissa_agent/gmail_scope.py`
-   and `tests/test_scope_guard.py`.
+This is now GJH INC's partner-ops agent, not an Omnissa-only tool --
+**Omnissa is one `partner_id` in `config/partners.yaml`, not the
+product.** The rules below are unconditional, not "day one":
+
+1. **Read-only, permanently.** No send, no compose, no label mutation,
+   no credential submission (courses, partner portal) without explicit
+   user approval -- `tests/test_no_write_capability.py` statically
+   scans the whole source tree for exactly this and is a hard stop if
+   it ever fails.
+2. Scope is the exact label allowlist in `config/partners.yaml` on
+   `george@gjh-inc.com` only (`consult@gjh-inc.com` + label `Omnissa`
+   was day-one placeholder text, never the real mailbox/label). Never
+   list/search/read any other label, never widen a query to
+   `in:all`/`in:anywhere`, never ingest the parent `Archive_` label or
+   anything not explicitly in that file.
+3. OAuth token lives mode `600` on Spark, under the dedicated
+   `omnissa-ingest` identity, scope `gmail.readonly` only --
+   `gmail.send`/`gmail.compose` have never been requested; see
+   `docs/autonomous-vision-and-open-decisions.md` before ever changing
+   that.
+4. Every fetch goes through `gmail_ingest.run_ingestion`'s own
+   allowlist loop (see `partners.py`) -- `gmail_scope.py` is a second,
+   redundant guard on top, not the primary enforcement point. Adding a
+   label means editing `config/partners.yaml`, confirmed via `cli.py
+   list-labels` first wherever possible -- never guessed speculatively
+   without flagging it as unconfirmed (see that file's own comments).
 
 ## Working method
 

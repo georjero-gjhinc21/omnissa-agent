@@ -180,7 +180,7 @@ def build_brief(
     line rather than a crash or an invented status.
     """
     lines = [
-        "# GJH INC -- Omnissa Daily Brief",
+        "# GJH INC -- Partner Ops Daily Brief",
         "",
         f"Authorized email label status: {email_status}",
         "",
@@ -250,7 +250,7 @@ def build_partner_ops_brief(
     """
     partner_baselines = partner_baselines or {}
     lines = [
-        "# GJH INC -- Omnissa Partner-Ops Daily Brief",
+        "# GJH INC -- Partner Ops Daily Brief",
         "",
         f"Authorized email label status: {email_status}",
         "",

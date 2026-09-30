@@ -15,7 +15,17 @@
 # the others; that's the real confirmed label text, not a typo, so it
 # stays exactly as given rather than being "corrected" to match the
 # other entries' pattern.
+#
+# Never add the bare parent "Archive_" label, or anything under
+# LinkedIn/news -- this allowlist is partner correspondence only, not
+# a general archive sweep. Adding a label here always means a specific,
+# confirmed (or explicitly-flagged-unconfirmed) partner, never a parent
+# category or an unrelated personal/news label that happens to exist.
+#
+# Wave 1 (below, operator-confirmed via list-labels) first, always --
+# Wave 2 (further down, translated/unconfirmed) stays after it.
 partners:
+  # --- Wave 1: confirmed via list-labels ---
   - id: omnissa
     label: "Archive_/@omnissa.com"
   - id: microsoft
@@ -33,6 +43,7 @@ partners:
   - id: zireh
     label: "Archive_/@zireh"
 
+  # --- Wave 2: translated from Gmail search-box syntax, unconfirmed ---
   # Given as Gmail SEARCH-BOX syntax ("label:archive_-@google.com", ...),
   # not raw list-labels output -- Gmail's search suggestions render a
   # nested label's "/" as "-" for display, but the underlying label

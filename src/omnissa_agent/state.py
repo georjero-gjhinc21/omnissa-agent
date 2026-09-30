@@ -21,10 +21,15 @@ import stat
 from pathlib import Path
 
 DEFAULT_STATE_DIR = Path(
-    os.environ.get(
-        "OMNISSA_AGENT_STATE_DIR",
-        os.path.expanduser("~/.local/state/omnissa-agent"),
-    )
+    # OMNISSA_AGENT_STATE_DIR checked FIRST, deliberately -- the live
+    # deployed units (User=omnissa-ingest/omnissa-analysis) already set
+    # --state-dir explicitly, but anything relying on this env var
+    # fallback must keep working unchanged through the partner_agent
+    # rebrand, with zero unit-file edit required. PARTNER_AGENT_STATE_DIR
+    # is the new name for anything written going forward.
+    os.environ.get("OMNISSA_AGENT_STATE_DIR")
+    or os.environ.get("PARTNER_AGENT_STATE_DIR")
+    or os.path.expanduser("~/.local/state/omnissa-agent")
 )
 MAX_SEEN_IDS = 5000  # bounded growth -- oldest ids drop off, per key
 ID_KEYS = ("seen_ids", "gmail_ingested_ids")

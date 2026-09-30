@@ -1,5 +1,34 @@
+import importlib
+
 from omnissa_agent import state as state_mod
 from omnissa_agent.lock import AlreadyRunningError, SingleInstanceLock
+
+
+def test_omnissa_agent_state_dir_env_var_still_wins_first(monkeypatch):
+    """The live deployed units don't set this env var at all (they pass
+    --state-dir explicitly), but anything else relying on it must keep
+    working unchanged through the partner_agent rebrand -- checked
+    FIRST, ahead of the new PARTNER_AGENT_STATE_DIR name."""
+    monkeypatch.setenv("OMNISSA_AGENT_STATE_DIR", "/tmp/old-name-wins")
+    monkeypatch.setenv("PARTNER_AGENT_STATE_DIR", "/tmp/new-name-loses")
+    importlib.reload(state_mod)
+    try:
+        assert str(state_mod.DEFAULT_STATE_DIR) == "/tmp/old-name-wins"
+    finally:
+        monkeypatch.delenv("OMNISSA_AGENT_STATE_DIR", raising=False)
+        monkeypatch.delenv("PARTNER_AGENT_STATE_DIR", raising=False)
+        importlib.reload(state_mod)  # restore the real default for subsequent tests
+
+
+def test_partner_agent_state_dir_env_var_works_when_old_one_is_unset(monkeypatch):
+    monkeypatch.delenv("OMNISSA_AGENT_STATE_DIR", raising=False)
+    monkeypatch.setenv("PARTNER_AGENT_STATE_DIR", "/tmp/new-name-used")
+    importlib.reload(state_mod)
+    try:
+        assert str(state_mod.DEFAULT_STATE_DIR) == "/tmp/new-name-used"
+    finally:
+        monkeypatch.delenv("PARTNER_AGENT_STATE_DIR", raising=False)
+        importlib.reload(state_mod)
 
 
 def test_save_state_preserves_original_owner_when_run_as_root(tmp_path, monkeypatch):

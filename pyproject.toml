@@ -3,9 +3,9 @@ requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "omnissa-agent"
+name = "partner-agent"
 version = "0.1.0"
-description = "Scoped Gmail + Omnissa partner-intelligence agent pipeline for GJH INC"
+description = "GJH INC partner-ops agent: scoped, read-only Gmail intelligence across a configured partner-label allowlist (Omnissa is one partner, not the product)"
 requires-python = ">=3.10"
 dependencies = []
 
