@@ -401,12 +401,28 @@ def _draft(args) -> int:
     return 0
 
 
-def _pipeline_from_ingest_result(ingest_result, *, kind: str, args) -> int:
+def _pipeline_from_ingest_result(ingest_result, *, kind: str, args, quiet_content: bool = False) -> int:
     """Shared back half: a verified IngestionResult -> Agent A/B -> report.
 
     Used by both ``run`` (single-process, credential-holding) and
     ``classify`` (privilege-separated: reads a drop file written by a
     separate, credential-holding identity -- never touches Gmail itself).
+
+    ``quiet_content``, set by ``classify`` only: ``run``/``scan``/``brief``
+    are documented manual/ad-hoc commands -- a human typed them and is
+    looking at their own terminal, so printing the brief there is exactly
+    the point. ``classify`` is the actual scheduled production path,
+    invoked unattended by a systemd service whose stdout/stderr go
+    straight into the system journal -- readable by anyone in
+    `adm`/`systemd-journal`, a broader audience than the dedicated
+    `omnissa-reports-readers` group that gates the report FILE itself.
+    Confirmed live (2026-09-30): real subject lines from a scheduled run
+    ended up in journalctl output that then had to be pasted for
+    diagnosis, directly violating the standing rule that message
+    content never leaves the operator's own terminal. The report file
+    (written either way, below) remains the correct, access-controlled
+    place for this content -- this only changes what reaches this
+    process's own stdout/stderr.
     """
     if ingest_result.deadline_hit:
         print("NOTE: ingestion deadline reached -- partial result this run", file=sys.stderr)
@@ -474,7 +490,10 @@ def _pipeline_from_ingest_result(ingest_result, *, kind: str, args) -> int:
         f"deadline_hit={ingest_result.deadline_hit} "
         f"message_list_truncated={message_list_truncated}"
     )
-    print(report.brief_markdown)
+    if quiet_content:
+        print(f"findings={report.findings_count} drafts={report.drafts_count}")
+    else:
+        print(report.brief_markdown)
     if report.llm_backend:
         print(f"LLM backend used: {report.llm_backend}", file=sys.stderr)
 
@@ -661,7 +680,7 @@ def _classify(args) -> int:
     # lock as "already held" and self-block on every single run --
     # confirmed live (2026-09-30) as a real regression while adding
     # locking to `ingest`, which had no equivalent existing protection.
-    rc = _pipeline_from_ingest_result(ingest_result, kind=args.kind, args=args)
+    rc = _pipeline_from_ingest_result(ingest_result, kind=args.kind, args=args, quiet_content=True)
 
     # Delete the drop file ONLY once every message it held has actually
     # been classified. Checked independently of `rc` here (not just

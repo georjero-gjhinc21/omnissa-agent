@@ -351,6 +351,68 @@ def test_classify_reports_partial_and_surfaces_it_in_the_brief_text(tmp_path):
     assert "VERIFIED (PARTIAL -- ingestion deadline reached)" in report
 
 
+def test_classify_never_prints_message_content_to_stdout_or_stderr(tmp_path, capsys):
+    """`classify` runs unattended under a systemd service -- its stdout/
+    stderr go straight into the system journal, readable by anyone in
+    the `adm`/`systemd-journal` group (broader than the dedicated
+    `omnissa-reports-readers` group that gates the report file itself).
+    Real subject lines must never appear there. The report FILE is the
+    correct, access-controlled place for message content -- this only
+    changes what reaches the process's own stdout/stderr, not what gets
+    written to disk.
+    """
+    drop = tmp_path / "drop.json"
+    distinctive_subject = "Omnissa Q4 MDF grant approval for GJH INC -- act by Friday"
+    result = gmail_ingest.IngestionResult(
+        status=gmail_ingest.IngestStatus.OK,
+        account="george@gjh-inc.com",
+        label_id="L1",
+        label_name="Archive_/@omnissa.com",
+        messages=[
+            GmailMessage(
+                id="m1", subject=distinctive_subject, snippet="hi",
+                sender="partner-programs@omnissa.com", date="2026-09-29", label_ids=("L1",),
+            )
+        ],
+    )
+    drop.write_text(json.dumps(result.to_json_dict()))
+
+    rc = cli.main(["classify", "--kind", "scan", "--ingest-result", str(drop), "--state-dir", str(tmp_path)])
+    assert rc == 0
+
+    captured = capsys.readouterr()
+    assert distinctive_subject not in captured.out, "subject text leaked into stdout -- journald would capture this"
+    assert distinctive_subject not in captured.err, "subject text leaked into stderr -- journald would capture this"
+
+    report = list((tmp_path / "reports").glob("*-scan.md"))[0].read_text()
+    assert distinctive_subject in report, "the report FILE must still contain the finding -- only stdout/stderr change"
+
+
+def test_run_scan_still_prints_the_brief_to_stdout_for_manual_use(tmp_path, capsys):
+    """`scan`/`run` are documented as manual/ad-hoc, human-at-a-terminal
+    commands (never the scheduled production path) -- their existing
+    behavior of printing the full brief to stdout must be unchanged."""
+    messages = [
+        {
+            "id": "m1",
+            "subject": "Omnissa Q4 MDF grant approval",
+            "snippet": "hi",
+            "sender": "partner-programs@omnissa.com",
+            "date": "2026-09-29",
+            "label_ids": ["omnissa"],
+        }
+    ]
+    msg_file = tmp_path / "messages.json"
+    msg_file.write_text(json.dumps(messages))
+
+    rc = cli.main([
+        "scan", "--email-status", "VERIFIED account=x label_id=L", "--messages", str(msg_file),
+        "--state-dir", str(tmp_path),
+    ])
+    assert rc == 0
+    assert "Omnissa Q4 MDF grant approval" in capsys.readouterr().out
+
+
 def test_ingest_and_classify_end_to_end_produce_the_same_result_as_run(tmp_path, monkeypatch):
     """The split path and the single-process `run` path must agree."""
     fake_result = gmail_ingest.IngestionResult(
